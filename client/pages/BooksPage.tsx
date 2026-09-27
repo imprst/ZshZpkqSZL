@@ -177,7 +177,7 @@ const BooksPage = () => {
   const liabilities = ledgerTotal("liability", "credit") - ledgerTotal("liability", "debit");
   const equity = ledgerTotal("equity", "credit") - ledgerTotal("equity", "debit") + revenue - expensesTotal;
   const openInvoices = visibleInvoices.filter((invoice) => invoice.status !== "paid" && invoice.status !== "void");
-  const receivable = openInvoices.reduce((sum, invoice) => sum + Number(invoice.total_due_due), 0);
+  const receivable = openInvoices.reduce((sum, invoice) => sum + Number(invoice.total_due), 0);
   const overdue = visibleInvoices.filter((invoice) => invoice.status === "overdue" || (invoice.status !== "paid" && invoice.due_date < today)).length;
   const contactName = (id: string | null) => contacts.find((contact) => contact.id === id)?.name || "Unassigned";
   const profit = revenue - expensesTotal;
