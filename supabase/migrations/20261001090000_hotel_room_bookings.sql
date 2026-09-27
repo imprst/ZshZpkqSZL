@@ -9,6 +9,27 @@ do $$ begin
   end if;
 end $$;
 
+create or replace function public.guard_hotel_profile_updates()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() = old.user_id and new.role is distinct from old.role then
+    raise exception 'Profile role changes require an authorized administrator';
+  end if;
+  if new.hotel_star_rating is distinct from old.hotel_star_rating
+     and (old.role <> 'manager' or new.role <> 'manager') then
+    raise exception 'Only manager profiles can change hotel classification';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists guard_hotel_profile_updates on public.user_profiles;
+create trigger guard_hotel_profile_updates
+before update of role, hotel_star_rating on public.user_profiles
+for each row execute function public.guard_hotel_profile_updates();
+revoke all on function public.guard_hotel_profile_updates() from public;
+
 alter table public.books_organizations
   add column if not exists hotel_classification smallint;
 
@@ -22,7 +43,8 @@ create or replace function public.sync_hotel_classification()
 returns trigger language plpgsql security definer set search_path = public
 as $$
 begin
-  if new.hotel_star_rating is distinct from old.hotel_star_rating then
+  if new.hotel_star_rating is distinct from old.hotel_star_rating
+     and old.role = 'manager' and new.role = 'manager' then
     update public.books_organizations bo
        set hotel_classification = new.hotel_star_rating
       from public.books_memberships bm
@@ -64,6 +86,7 @@ update public.books_organizations bo
   join public.user_profiles up on up.user_id = bm.user_id
  where bm.organization_id = bo.id
    and bm.role = 'owner'
+   and up.role = 'manager'
    and up.hotel_star_rating between 1 and 5
    and bo.hotel_classification is distinct from up.hotel_star_rating;
 
@@ -86,17 +109,32 @@ create table if not exists public.hotel_booking_offers (
   is_active boolean not null default true,
   starts_at timestamptz,
   ends_at timestamptz,
+  discount_percentage numeric(5,2) not null default 0 check (discount_percentage between 0 and 100),
+  minimum_nights integer not null default 1 check (minimum_nights > 0),
   created_at timestamptz not null default now(),
   check (ends_at is null or starts_at is null or ends_at > starts_at)
 );
 
-insert into public.hotel_booking_offers (title, description, display_order)
-select seed.title, seed.description, seed.display_order
+alter table public.hotel_booking_offers
+  add column if not exists discount_percentage numeric(5,2) not null default 0 check (discount_percentage between 0 and 100),
+  add column if not exists minimum_nights integer not null default 1 check (minimum_nights > 0);
+
+insert into public.hotel_booking_offers (title, description, display_order, discount_percentage, minimum_nights)
+select seed.title, seed.description, seed.display_order, seed.discount_percentage, seed.minimum_nights
 from (values
-  ('Welcome Bonus', 'First-time guests receive complimentary spa access.', 1),
-  ('Extended Stay', 'Stay three or more nights and save 15% on accommodation.', 2)
-) as seed(title, description, display_order)
-where not exists (select 1 from public.hotel_booking_offers);
+  ('Extended Stay', 'Stay three or more nights and save 15% on accommodation.', 1, 15::numeric, 3)
+) as seed(title, description, display_order, discount_percentage, minimum_nights)
+where not exists (select 1 from public.hotel_booking_offers existing where existing.title = seed.title);
+
+update public.hotel_booking_offers
+   set discount_percentage = 15, minimum_nights = 3
+ where title = 'Extended Stay'
+   and description = 'Stay three or more nights and save 15% on accommodation.'
+   and discount_percentage = 0;
+update public.hotel_booking_offers
+   set is_active = false
+ where title = 'Welcome Bonus'
+   and description = 'First-time guests receive complimentary spa access.';
 
 create table if not exists public.hotel_rooms (
   id uuid primary key default gen_random_uuid(),
@@ -111,6 +149,7 @@ create table if not exists public.hotel_rooms (
   nightly_rate numeric(14,2) not null check (nightly_rate > 0),
   original_nightly_rate numeric(14,2) check (original_nightly_rate is null or original_nightly_rate > nightly_rate),
   currency_code char(3) not null default 'USD' check (currency_code in ('USD', 'UGX', 'EUR', 'GBP', 'KES', 'TZS', 'RWF')),
+  check (currency_code not in ('UGX', 'RWF', 'TZS') or (nightly_rate = trunc(nightly_rate) and (original_nightly_rate is null or original_nightly_rate = trunc(original_nightly_rate)))),
   amenities text[] not null default '{}',
   status text not null default 'draft' check (status in ('draft', 'published', 'unavailable')),
   created_by uuid not null references auth.users(id) on delete restrict,
@@ -150,6 +189,33 @@ cross join (values
   ('Garden Villa', 'villa', 'Tranquil villa surrounded by lush gardens and natural beauty.', 60::numeric, 4, 449::numeric, 599::numeric, array['Private garden', 'Outdoor bath', 'Fireplace', 'Terrace']::text[])
 ) as seed(name, room_type, description, size_sqm, max_guests, nightly_rate, original_nightly_rate, amenities)
 where not exists (select 1 from public.hotel_rooms r where r.organization_id = bo.id and r.name = seed.name);
+
+create or replace view public.hotel_public_room_listings with (security_barrier = true) as
+select
+  r.id,
+  r.organization_id,
+  r.name,
+  r.room_type,
+  r.description,
+  r.image_url,
+  r.size_sqm,
+  r.max_guests,
+  r.available_units,
+  r.nightly_rate,
+  r.original_nightly_rate,
+  r.currency_code,
+  r.amenities,
+  r.status,
+  bo.name as hotel_name,
+  bo.city as hotel_city,
+  bo.country as hotel_country,
+  bo.hotel_classification
+from public.hotel_rooms r
+join public.books_organizations bo on bo.id = r.organization_id
+where r.status = 'published'
+  and bo.hotel_classification between 1 and 5;
+
+grant select on public.hotel_public_room_listings to anon, authenticated;
 
 create table if not exists public.hotel_bookings (
   id uuid primary key default gen_random_uuid(),
@@ -218,6 +284,13 @@ create table if not exists public.books_fx_rates (
   check (base_currency <> quote_currency)
 );
 
+create table if not exists public.hotel_booking_rate_limits (
+  rate_key text not null check (length(rate_key) = 64),
+  window_started_at timestamptz not null,
+  attempt_count integer not null default 0 check (attempt_count between 1 and 10),
+  primary key (rate_key, window_started_at)
+);
+
 create index if not exists hotel_rooms_public_idx on public.hotel_rooms (status, organization_id, created_at desc);
 create index if not exists hotel_bookings_room_dates_idx on public.hotel_bookings (room_id, check_in, check_out, booking_status, expires_at);
 create index if not exists hotel_bookings_org_created_idx on public.hotel_bookings (organization_id, created_at desc);
@@ -242,6 +315,7 @@ alter table public.hotel_rooms enable row level security;
 alter table public.hotel_bookings enable row level security;
 alter table public.hotel_payment_attempts enable row level security;
 alter table public.books_fx_rates enable row level security;
+alter table public.hotel_booking_rate_limits enable row level security;
 
 drop policy if exists hotel_booking_settings_read on public.hotel_booking_page_settings;
 create policy hotel_booking_settings_read on public.hotel_booking_page_settings for select to anon, authenticated using (true);
@@ -257,8 +331,35 @@ drop policy if exists hotel_rooms_manager_delete on public.hotel_rooms;
 create policy hotel_rooms_manager_delete on public.hotel_rooms for delete to authenticated using (exists (select 1 from public.user_profiles up join public.books_memberships bm on bm.user_id = up.user_id where up.user_id = auth.uid() and up.role = 'manager' and bm.organization_id = hotel_rooms.organization_id and bm.role in ('owner', 'admin')));
 drop policy if exists hotel_bookings_owner_read on public.hotel_bookings;
 create policy hotel_bookings_owner_read on public.hotel_bookings for select to authenticated using (user_id = auth.uid() or exists (select 1 from public.user_profiles up join public.books_memberships bm on bm.user_id = up.user_id where up.user_id = auth.uid() and up.role = 'manager' and bm.organization_id = hotel_bookings.organization_id and bm.role in ('owner', 'admin')));
+drop policy if exists hotel_payment_attempts_manager_read on public.hotel_payment_attempts;
+create policy hotel_payment_attempts_manager_read on public.hotel_payment_attempts for select to authenticated using (exists (select 1 from public.hotel_bookings hb join public.user_profiles up on up.user_id = auth.uid() and up.role = 'manager' join public.books_memberships bm on bm.user_id = up.user_id and bm.organization_id = hb.organization_id and bm.role in ('owner', 'admin') where hb.id = hotel_payment_attempts.booking_id));
 drop policy if exists books_fx_rates_read on public.books_fx_rates;
 create policy books_fx_rates_read on public.books_fx_rates for select to anon, authenticated using (true);
+
+drop function if exists public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, text, jsonb);
+drop function if exists public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, text, text, jsonb);
+drop function if exists public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, text, jsonb);
+
+create or replace function public.consume_hotel_booking_rate_limit(target_rate_limit_key text)
+returns boolean language plpgsql security definer set search_path = public
+as $$
+declare limit_count integer;
+begin
+  if target_rate_limit_key is null or length(target_rate_limit_key) <> 64 then
+    raise exception 'Booking request is invalid';
+  end if;
+  insert into public.hotel_booking_rate_limits (rate_key, window_started_at, attempt_count)
+  values (target_rate_limit_key, date_trunc('hour', now()), 1)
+  on conflict (rate_key, window_started_at) do update
+    set attempt_count = public.hotel_booking_rate_limits.attempt_count + 1
+    where public.hotel_booking_rate_limits.attempt_count < 10
+  returning attempt_count into limit_count;
+  delete from public.hotel_booking_rate_limits where window_started_at < date_trunc('hour', now()) - interval '48 hours';
+  return limit_count is not null;
+end;
+$$;
+revoke all on function public.consume_hotel_booking_rate_limit(text) from public, anon, authenticated;
+grant execute on function public.consume_hotel_booking_rate_limit(text) to service_role;
 
 create or replace function public.create_hotel_booking(
   target_room_id uuid,
@@ -269,6 +370,7 @@ create or replace function public.create_hotel_booking(
   target_room_count integer,
   target_special_requests text,
   target_preferences jsonb,
+  target_user_id uuid,
   target_idempotency_key uuid,
   target_access_token_hash text,
   target_fx_rates jsonb
@@ -283,6 +385,8 @@ declare
   usd_per_ugx numeric;
   room_currency_per_ugx numeric;
   local_hotel_tax_per_room numeric;
+  discount_rate numeric := 0;
+  currency_decimals integer;
   nights_count integer;
   reserved_units integer;
   room_subtotal numeric;
@@ -320,7 +424,7 @@ begin
 
   select * into existing_booking from public.hotel_bookings where idempotency_key = target_idempotency_key;
   if found then
-    if existing_booking.access_token_hash <> target_access_token_hash then raise exception 'Idempotency key does not match booking access credential'; end if;
+    if existing_booking.access_token_hash <> target_access_token_hash or (existing_booking.user_id is not null and existing_booking.user_id is distinct from target_user_id) then raise exception 'Idempotency key does not match booking access credential'; end if;
     return query select existing_booking.id, existing_booking.confirmation_number, existing_booking.currency_code, existing_booking.nights, existing_booking.nightly_subtotal, existing_booking.discount_amount, existing_booking.taxable_subtotal, existing_booking.vat_amount, existing_booking.lht_amount, existing_booking.total_amount, existing_booking.hotel_classification, existing_booking.expires_at;
     return;
   end if;
@@ -337,19 +441,30 @@ begin
   select coalesce(sum(room_count), 0) into reserved_units
     from public.hotel_bookings
    where room_id = selected_room.id
-     and booking_status in ('pending', 'confirmed')
-     and (booking_status = 'confirmed' or expires_at > now())
+     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
+       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
      and check_in < target_check_out and check_out > target_check_in;
   if reserved_units + target_room_count > selected_room.available_units then
     raise exception 'The selected room is no longer available for these dates';
   end if;
+
+  nights_count := target_check_out - target_check_in;
+  currency_decimals := case when trim(selected_room.currency_code) in ('UGX', 'RWF', 'TZS') then 0 else 2 end;
+  room_subtotal := round(selected_room.nightly_rate * nights_count * target_room_count, currency_decimals);
+  select coalesce(max(discount_percentage), 0) into discount_rate
+    from public.hotel_booking_offers
+   where is_active and minimum_nights <= nights_count
+     and (starts_at is null or starts_at <= now())
+     and (ends_at is null or ends_at > now());
+  discount_value := round(room_subtotal * discount_rate / 100, currency_decimals);
+  taxable_value := room_subtotal - discount_value;
 
   room_currency_per_ugx := (target_fx_rates->>trim(selected_room.currency_code))::numeric;
   usd_per_ugx := (target_fx_rates->>'USD')::numeric;
   if room_currency_per_ugx is null or room_currency_per_ugx <= 0 or usd_per_ugx is null or usd_per_ugx <= 0 then
     raise exception 'A current exchange-rate snapshot is required to calculate hotel levies';
   end if;
-  room_rate_in_ugx := selected_room.nightly_rate / room_currency_per_ugx;
+  room_rate_in_ugx := (selected_room.nightly_rate * (1 - discount_rate / 100)) / room_currency_per_ugx;
   if selected_classification in (4, 5) then
     local_hotel_tax_per_room := (2 / usd_per_ugx) * room_currency_per_ugx;
   elsif selected_classification in (2, 3) or room_rate_in_ugx > 50000 then
@@ -359,24 +474,19 @@ begin
   else
     local_hotel_tax_per_room := 500 * room_currency_per_ugx;
   end if;
-
-  nights_count := target_check_out - target_check_in;
-  room_subtotal := round(selected_room.nightly_rate * nights_count * target_room_count, 2);
-  discount_value := case when nights_count >= 3 then round(room_subtotal * 0.15, 2) else 0 end;
-  taxable_value := room_subtotal - discount_value;
-  vat_value := round(taxable_value * 0.18, 2);
-  lht_value := round(local_hotel_tax_per_room * nights_count * target_room_count, 2);
+  vat_value := round(taxable_value * 0.18, currency_decimals);
+  lht_value := round(local_hotel_tax_per_room * nights_count * target_room_count, currency_decimals);
   total_value := taxable_value + vat_value + lht_value;
   new_confirmation := 'ST-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10));
   hold_expires := now() + interval '20 minutes';
 
   insert into public.hotel_bookings (
-    confirmation_number, organization_id, room_id, check_in, check_out, nights, guest_count, room_count,
+    confirmation_number, organization_id, room_id, user_id, check_in, check_out, nights, guest_count, room_count,
     guest_first_name, guest_last_name, guest_email, guest_phone, special_requests, room_preferences,
     currency_code, nightly_subtotal, discount_amount, taxable_subtotal, vat_amount, lht_amount, total_amount,
     hotel_classification, fx_rates_snapshot, expires_at, idempotency_key, access_token_hash
   ) values (
-    new_confirmation, selected_room.organization_id, selected_room.id, target_check_in, target_check_out, nights_count, target_guest_count, target_room_count,
+    new_confirmation, selected_room.organization_id, selected_room.id, target_user_id, target_check_in, target_check_out, nights_count, target_guest_count, target_room_count,
     trim(target_guest->>'first_name'), trim(target_guest->>'last_name'), lower(trim(target_guest->>'email')), trim(target_guest->>'phone'),
     nullif(trim(target_special_requests), ''), target_preferences,
     selected_room.currency_code, room_subtotal, discount_value, taxable_value, vat_value, lht_value, total_value,
@@ -394,8 +504,8 @@ begin
 end;
 $$;
 
-revoke all on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, text, jsonb) from public, anon, authenticated;
-grant execute on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, text, jsonb) to service_role;
+revoke all on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, jsonb) from public, anon, authenticated;
+grant execute on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, jsonb) to service_role;
 
 create or replace function public.confirm_hotel_booking_payment(target_tx_ref text, target_transaction_id text)
 returns table (booking_id uuid, confirmation_number text, payment_status text, booking_status text)
@@ -436,12 +546,17 @@ begin
   select coalesce(sum(room_count), 0) into reserved_units
     from public.hotel_bookings
    where room_id = booking.room_id and id <> booking.id
-     and (booking_status = 'confirmed' or (booking_status = 'pending' and expires_at > now()))
+     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
+       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
      and check_in < booking.check_out and check_out > booking.check_in;
   if reserved_units + booking.room_count > room.available_units then
     resolved_status := 'manual_review';
   end if;
-  update public.hotel_payment_attempts set status = 'completed', transaction_id = target_transaction_id, completed_at = now() where id = attempt.id;
+  update public.hotel_payment_attempts
+     set status = case when resolved_status = 'manual_review' then 'manual_review' else 'completed' end,
+         transaction_id = target_transaction_id,
+         completed_at = now()
+   where id = attempt.id;
   update public.hotel_bookings set payment_status = 'paid', booking_status = resolved_status, expires_at = null where id = booking.id;
   return query select booking.id, booking.confirmation_number, 'paid'::text, resolved_status;
 end;
@@ -451,7 +566,125 @@ revoke all on function public.confirm_hotel_booking_payment(text, text) from pub
 grant execute on function public.confirm_hotel_booking_payment(text, text) to service_role;
 
 alter table public.books_invoices add column if not exists other_charges numeric(20,4) not null default 0 check (other_charges >= 0);
+
+do $$
+declare total_is_generated boolean;
+begin
+  select attgenerated <> '' into total_is_generated
+    from pg_attribute
+   where attrelid = 'public.books_invoices'::regclass
+     and attname = 'total'
+     and not attisdropped;
+  if coalesce(total_is_generated, false) then
+    alter table public.books_invoices alter column total drop expression;
+  end if;
+end;
+$$;
+
 alter table public.books_invoices add column if not exists total_due numeric(20,4) generated always as (subtotal + tax_amount + other_charges) stored;
+
+create or replace function public.set_books_invoice_total()
+returns trigger language plpgsql set search_path = public
+as $$
+begin
+  new.total := new.subtotal + new.tax_amount + new.other_charges;
+  return new;
+end;
+$$;
+
+drop trigger if exists books_invoice_total_before_write on public.books_invoices;
+create trigger books_invoice_total_before_write
+before insert or update on public.books_invoices
+for each row execute function public.set_books_invoice_total();
+
+alter table public.books_invoices
+  alter column total type numeric(20,4)
+  using (subtotal + tax_amount + other_charges);
+
+create or replace function public.apply_books_invoice_tax()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+declare selected_rate numeric;
+begin
+  if new.tax_rate_id is not null then
+    select rate_percentage into selected_rate
+      from public.books_tax_rates
+     where id = new.tax_rate_id
+       and organization_id = new.organization_id
+       and is_active
+       and new.issue_date >= effective_from
+       and (effective_to is null or new.issue_date <= effective_to);
+    if selected_rate is null then raise exception 'Selected tax rate is not active for this invoice date'; end if;
+    new.tax_rate_percentage := selected_rate;
+    new.tax_amount := case when new.invoice_number like 'HOTEL-%'
+      then round(new.subtotal * selected_rate / 100, 2)
+      else round(new.subtotal * selected_rate / 100, 4)
+    end;
+  else
+    new.tax_rate_percentage := 0;
+    new.tax_amount := 0;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists books_invoice_tax_before_write on public.books_invoices;
+create trigger books_invoice_tax_before_write
+before insert or update on public.books_invoices
+for each row execute function public.apply_books_invoice_tax();
+
+create or replace function public.post_hotel_invoice_recognition(target_invoice_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+declare
+  invoice_row public.books_invoices%rowtype;
+  owner_user_id uuid;
+  journal_id uuid;
+  cash_receivable_id uuid;
+  revenue_id uuid;
+  vat_payable_id uuid;
+  local_tax_payable_id uuid;
+begin
+  select * into invoice_row from public.books_invoices where id = target_invoice_id;
+  if not found or invoice_row.status <> 'paid' or invoice_row.invoice_number not like 'HOTEL-%' then return; end if;
+
+  select owner_id into owner_user_id from public.books_organizations where id = invoice_row.organization_id;
+  insert into public.books_accounts (organization_id, code, name, type, is_system)
+  values
+    (invoice_row.organization_id, '2100', 'VAT payable', 'liability', true),
+    (invoice_row.organization_id, '2200', 'Local hotel tax payable', 'liability', true)
+  on conflict (organization_id, code) do nothing;
+
+  select id into cash_receivable_id from public.books_accounts where organization_id = invoice_row.organization_id and code = '1100' and type = 'asset';
+  select id into revenue_id from public.books_accounts where organization_id = invoice_row.organization_id and code = '4000' and type = 'income';
+  select id into vat_payable_id from public.books_accounts where organization_id = invoice_row.organization_id and code = '2100' and type = 'liability';
+  select id into local_tax_payable_id from public.books_accounts where organization_id = invoice_row.organization_id and code = '2200' and type = 'liability';
+  if cash_receivable_id is null or revenue_id is null or vat_payable_id is null or local_tax_payable_id is null then
+    raise exception 'Required Books accounts are missing for the hotel invoice';
+  end if;
+
+  insert into public.books_journal_transactions (organization_id, source_type, source_id, transaction_date, description, created_by)
+  values (invoice_row.organization_id, 'hotel_invoice_recognition', invoice_row.id, invoice_row.issue_date, 'Recognize hotel invoice ' || invoice_row.invoice_number, owner_user_id)
+  on conflict do nothing returning id into journal_id;
+  if journal_id is null then return; end if;
+
+  insert into public.books_journal_lines (transaction_id, account_id, debit, currency_code)
+  values (journal_id, cash_receivable_id, invoice_row.total, invoice_row.currency_code);
+  if invoice_row.subtotal > 0 then
+    insert into public.books_journal_lines (transaction_id, account_id, credit, currency_code)
+    values (journal_id, revenue_id, invoice_row.subtotal, invoice_row.currency_code);
+  end if;
+  if invoice_row.tax_amount > 0 then
+    insert into public.books_journal_lines (transaction_id, account_id, credit, currency_code)
+    values (journal_id, vat_payable_id, invoice_row.tax_amount, invoice_row.currency_code);
+  end if;
+  if invoice_row.other_charges > 0 then
+    insert into public.books_journal_lines (transaction_id, account_id, credit, currency_code)
+    values (journal_id, local_tax_payable_id, invoice_row.other_charges, invoice_row.currency_code);
+  end if;
+end;
+$$;
+revoke all on function public.post_hotel_invoice_recognition(uuid) from public, anon, authenticated;
 
 create or replace function public.post_paid_hotel_booking_to_books()
 returns trigger language plpgsql security definer set search_path = public
@@ -485,8 +718,14 @@ begin
   if vat_rate_id is null then
     insert into public.books_tax_rates (organization_id, country_code, name, rate_percentage)
     values (new.organization_id, 'UG', 'Uganda VAT 18%', 18)
-    returning id into vat_rate_id;
+    on conflict (organization_id, name, effective_from) do update
+      set is_active = true, effective_to = null;
+    select id into vat_rate_id from public.books_tax_rates
+     where organization_id = new.organization_id and country_code = 'UG' and rate_percentage = 18
+       and is_active and current_date >= effective_from and (effective_to is null or current_date <= effective_to)
+     order by effective_from desc limit 1;
   end if;
+  if vat_rate_id is null then raise exception 'An active Uganda VAT rate could not be created'; end if;
 
   insert into public.books_invoices (
     organization_id, contact_id, invoice_number, issue_date, due_date, currency_code, subtotal,
@@ -505,6 +744,7 @@ begin
     insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
     values (invoice_uuid, new.organization_id, 'Local Hotel Tax', 1, new.lht_amount);
   end if;
+  perform public.post_hotel_invoice_recognition(invoice_uuid);
   update public.hotel_bookings set books_invoice_id = invoice_uuid where id = new.id;
   return new;
 end;
@@ -521,7 +761,7 @@ returns trigger language plpgsql security definer set search_path = public
 as $$
 begin
   if new.status = 'paid' and (tg_op = 'INSERT' or old.status is distinct from 'paid') then
-    perform public.post_books_journal_entry(new.organization_id, 'invoice_payment', new.id, new.issue_date, 'Payment received for invoice ' || new.invoice_number, '1000', '1100', new.total_due, new.currency_code, auth.uid());
+    perform public.post_books_journal_entry(new.organization_id, 'invoice_payment', new.id, new.issue_date, 'Payment received for invoice ' || new.invoice_number, '1000', '1100', new.total, new.currency_code, auth.uid());
   end if;
   return new;
 end;
@@ -552,16 +792,18 @@ begin
   return query
   with invoice_totals as (
     select i.currency_code::char(3) as currency_code,
-      sum(i.total_due) filter (where i.status <> 'void') as invoice_total,
-      sum(i.subtotal) filter (where i.status <> 'void') as income,
+      sum(i.total) filter (where i.status <> 'void') as invoice_total,
+      sum(i.subtotal) filter (where i.status in ('sent', 'overdue', 'paid')) as income,
       sum(i.tax_amount + i.other_charges) filter (where i.status <> 'void') as tax_total,
-      sum(i.total_due) filter (where i.status not in ('paid', 'void')) as receivables
+      sum(i.total) filter (where i.status in ('sent', 'overdue')) as receivables
     from public.books_invoices i where i.organization_id = target_organization_id group by i.currency_code
   ), expense_totals as (
     select e.currency_code::char(3) as currency_code, sum(e.amount + e.tax_amount) as expenses
     from public.books_expenses e where e.organization_id = target_organization_id group by e.currency_code
   ), ledger_totals as (
     select jl.currency_code::char(3) as currency_code,
+      sum(jl.credit - jl.debit) filter (where a.type = 'income') as income,
+      sum(jl.debit - jl.credit) filter (where a.type = 'expense') as expenses,
       sum(jl.debit - jl.credit) filter (where a.type = 'asset') as assets,
       sum(jl.credit - jl.debit) filter (where a.type = 'liability') as liabilities,
       sum(jl.credit - jl.debit) filter (where a.type = 'equity') as equity
@@ -587,11 +829,12 @@ $$;
 revoke all on function public.get_books_currency_totals(uuid) from public, anon;
 grant execute on function public.get_books_currency_totals(uuid) to authenticated;
 
-grant select on public.hotel_booking_page_settings, public.hotel_booking_offers, public.hotel_rooms, public.books_fx_rates to anon, authenticated;
-grant select on public.hotel_bookings to authenticated;
+grant select on public.hotel_booking_page_settings, public.hotel_booking_offers, public.books_fx_rates to anon, authenticated;
+grant select on public.hotel_public_room_listings to anon, authenticated;
+grant select on public.hotel_bookings, public.hotel_payment_attempts to authenticated;
 grant select, insert, update, delete on public.hotel_rooms to authenticated;
 
-grant all on public.hotel_booking_page_settings, public.hotel_booking_offers, public.hotel_rooms, public.hotel_bookings, public.hotel_payment_attempts, public.books_fx_rates to service_role;
+grant all on public.hotel_booking_page_settings, public.hotel_booking_offers, public.hotel_rooms, public.hotel_bookings, public.hotel_payment_attempts, public.books_fx_rates, public.hotel_booking_rate_limits to service_role;
 
 notify pgrst, 'reload schema';
 commit;

@@ -81,7 +81,7 @@ const FlutterwaveReturnPage = () => {
         const payload = await response.json().catch(() => null) as { orderNumber?: string; confirmationNumber?: string; confirmation_number?: string; paymentStatus?: string; payment_status?: string; booking_status?: string; error?: string } | null;
         const orderNumber = payload?.orderNumber || payload?.confirmation_number || payload?.confirmationNumber;
         if (!response.ok || (!orderNumber && !hotelBooking)) throw new Error(payload?.error || `Payment could not be confirmed (HTTP ${response.status}).`);
-        if ((eventPayment && payload?.paymentStatus === "manual_review") || (hotelBooking && payload?.booking_status === "manual_review")) {
+        if ((eventPayment && payload?.paymentStatus === "manual_review") || (hotelBooking && (payload?.booking_status === "manual_review" || payload?.payment_status === "manual_review"))) {
           clearPendingCheckout();
           if (hotelBooking) sessionStorage.removeItem("hotel-booking-access");
           if (active) setResult({ status: "review", orderNumber: orderNumber || "Review required", hotelBooking });

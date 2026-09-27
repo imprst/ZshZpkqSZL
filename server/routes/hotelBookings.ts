@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { RequestHandler } from "express";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
@@ -133,6 +133,17 @@ const fetchAndStoreRates = async () => {
 };
 
 const safeText = (value: unknown, maxLength: number) => typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+const resolveAuthenticatedUserId = async (authorization: string | undefined) => {
+  if (!authorization) return null;
+  if (!authorization.startsWith("Bearer ")) throw new HotelBookingError("Your sign-in session is invalid", 401);
+  const { supabaseUrl, supabaseAnonKey } = configuration();
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, { headers: { apikey: supabaseAnonKey, Authorization: authorization } });
+  if (!response.ok) throw new HotelBookingError("Your sign-in session has expired. Sign in again and retry.", 401);
+  const user = await response.json() as { id?: string };
+  if (!user.id) throw new HotelBookingError("Your sign-in session could not be verified", 401);
+  return user.id;
+};
+
 const getBooking = async (bookingId: string) => {
   const rows = await readService<HotelBooking[]>(`hotel_bookings?id=eq.${encodeURIComponent(bookingId)}&select=*`);
   if (!rows[0]) throw new HotelBookingError("Hotel reservation was not found", 404);
@@ -172,7 +183,11 @@ const createBooking: RequestHandler = async (request, response) => {
       idempotencyKey?: string;
       accessToken?: string;
     };
+    const userId = await resolveAuthenticatedUserId(request.headers.authorization);
     const email = safeText(body.guest?.email, 254).toLowerCase();
+    const forwardedAddress = request.headers["x-vercel-forwarded-for"] || request.headers["x-nf-client-connection-ip"];
+    const clientAddress = (Array.isArray(forwardedAddress) ? forwardedAddress[0] : forwardedAddress)?.split(",")[0]?.trim() || request.ip || request.socket.remoteAddress || "unknown";
+    const rateLimitKey = createHash("sha256").update(clientAddress).digest("hex");
     if (!body.roomId || !/^[0-9a-f-]{36}$/i.test(body.roomId)) throw new HotelBookingError("Select a valid room");
     if (!body.checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkIn) || !body.checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkOut)) throw new HotelBookingError("Select valid check-in and check-out dates");
     if (!body.idempotencyKey || !/^[0-9a-f-]{36}$/i.test(body.idempotencyKey)) throw new HotelBookingError("Booking request is invalid");
@@ -184,6 +199,9 @@ const createBooking: RequestHandler = async (request, response) => {
     if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
     const currency = selectedRoom.currency_code.trim().toUpperCase();
     if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
+
+    const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
+    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
 
     const rows = await callServiceRpc<Array<{ booking_id: string; confirmation_number: string; total_amount: number; currency_code: string; expires_at: string }>>(
       "create_hotel_booking",
@@ -201,6 +219,7 @@ const createBooking: RequestHandler = async (request, response) => {
         target_room_count: body.roomCount,
         target_special_requests: safeText(body.specialRequests, 2000),
         target_preferences: body.preferences,
+        target_user_id: userId,
         target_idempotency_key: body.idempotencyKey,
         target_access_token_hash: createHash("sha256").update(body.accessToken).digest("hex"),
         target_fx_rates: { ...ratesSnapshot.rates, as_of: ratesSnapshot.asOf, provider: ratesSnapshot.provider },
@@ -239,10 +258,9 @@ const createPaymentSession: RequestHandler = async (request, response) => {
       response.json({ paymentUrl: active.payment_url, txRef: active.tx_ref, bookingId: booking.id });
       return;
     }
-    if (active?.status === "initiated" && Date.now() - new Date(active.created_at).getTime() < 120_000) {
+    if (active?.status === "initiated") {
       throw new HotelBookingError("Secure checkout is being prepared. Try again in a moment.", 409);
     }
-    if (active) await writeService(`hotel_payment_attempts?id=eq.${encodeURIComponent(active.id)}`, "PATCH", { status: "expired" });
 
     const secretKey = process.env.FLUTTERWAVE_SECRET_KEY;
     if (!secretKey) throw new Error("Flutterwave payment configuration is incomplete");
@@ -371,7 +389,10 @@ export const cancelHotelBookingPayment: RequestHandler = async (request, respons
 export const handleHotelBookingWebhook: RequestHandler = async (request, response) => {
   const signature = request.headers["verif-hash"];
   const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
-  if (!signature || !secretHash || signature !== secretHash) return response.status(401).end();
+  const signatureBytes = typeof signature === "string" ? Buffer.from(signature) : null;
+  const secretBytes = secretHash ? Buffer.from(secretHash) : null;
+  const signatureIsValid = Boolean(signatureBytes && secretBytes && signatureBytes.length === secretBytes.length && timingSafeEqual(signatureBytes, secretBytes));
+  if (!signatureIsValid) return response.status(401).end();
   const payload = request.body as { event?: string; data?: { id?: string | number; tx_ref?: string } };
   if (payload.event !== "charge.completed" || !payload.data?.id || !payload.data.tx_ref?.startsWith("hotel-")) return response.status(200).end();
   try {

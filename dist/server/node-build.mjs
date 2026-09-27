@@ -2,7 +2,7 @@ import path from "path";
 import * as express from "express";
 import express__default from "express";
 import cors from "cors";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 const handleDemo = (req, res) => {
   const response = {
     message: "Hello from Express server"
@@ -658,6 +658,16 @@ const fetchAndStoreRates = async () => {
   return { rates, asOf, provider: fxProvider };
 };
 const safeText = (value, maxLength) => typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+const resolveAuthenticatedUserId = async (authorization) => {
+  if (!authorization) return null;
+  if (!authorization.startsWith("Bearer ")) throw new HotelBookingError("Your sign-in session is invalid", 401);
+  const { supabaseUrl, supabaseAnonKey } = configuration();
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, { headers: { apikey: supabaseAnonKey, Authorization: authorization } });
+  if (!response.ok) throw new HotelBookingError("Your sign-in session has expired. Sign in again and retry.", 401);
+  const user = await response.json();
+  if (!user.id) throw new HotelBookingError("Your sign-in session could not be verified", 401);
+  return user.id;
+};
 const getBooking = async (bookingId) => {
   const rows = await readService(`hotel_bookings?id=eq.${encodeURIComponent(bookingId)}&select=*`);
   if (!rows[0]) throw new HotelBookingError("Hotel reservation was not found", 404);
@@ -681,7 +691,11 @@ const getReturnUrl = () => {
 const createBooking = async (request, response) => {
   try {
     const body = request.body;
+    const userId = await resolveAuthenticatedUserId(request.headers.authorization);
     const email = safeText(body.guest?.email, 254).toLowerCase();
+    const forwardedAddress = request.headers["x-vercel-forwarded-for"] || request.headers["x-nf-client-connection-ip"];
+    const clientAddress = (Array.isArray(forwardedAddress) ? forwardedAddress[0] : forwardedAddress)?.split(",")[0]?.trim() || request.ip || request.socket.remoteAddress || "unknown";
+    const rateLimitKey = createHash("sha256").update(clientAddress).digest("hex");
     if (!body.roomId || !/^[0-9a-f-]{36}$/i.test(body.roomId)) throw new HotelBookingError("Select a valid room");
     if (!body.checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkIn) || !body.checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(body.checkOut)) throw new HotelBookingError("Select valid check-in and check-out dates");
     if (!body.idempotencyKey || !/^[0-9a-f-]{36}$/i.test(body.idempotencyKey)) throw new HotelBookingError("Booking request is invalid");
@@ -693,6 +707,8 @@ const createBooking = async (request, response) => {
     if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
     const currency = selectedRoom.currency_code.trim().toUpperCase();
     if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
+    const rateLimitAllowed = await callServiceRpc("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
+    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
     const rows = await callServiceRpc(
       "create_hotel_booking",
       {
@@ -709,6 +725,7 @@ const createBooking = async (request, response) => {
         target_room_count: body.roomCount,
         target_special_requests: safeText(body.specialRequests, 2e3),
         target_preferences: body.preferences,
+        target_user_id: userId,
         target_idempotency_key: body.idempotencyKey,
         target_access_token_hash: createHash("sha256").update(body.accessToken).digest("hex"),
         target_fx_rates: { ...ratesSnapshot.rates, as_of: ratesSnapshot.asOf, provider: ratesSnapshot.provider }
@@ -864,7 +881,10 @@ const cancelHotelBookingPayment = async (request, response) => {
 const handleHotelBookingWebhook = async (request, response) => {
   const signature = request.headers["verif-hash"];
   const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
-  if (!signature || !secretHash || signature !== secretHash) return response.status(401).end();
+  const signatureBytes = typeof signature === "string" ? Buffer.from(signature) : null;
+  const secretBytes = secretHash ? Buffer.from(secretHash) : null;
+  const signatureIsValid = Boolean(signatureBytes && secretBytes && signatureBytes.length === secretBytes.length && timingSafeEqual(signatureBytes, secretBytes));
+  if (!signatureIsValid) return response.status(401).end();
   const payload = request.body;
   if (payload.event !== "charge.completed" || !payload.data?.id || !payload.data.tx_ref?.startsWith("hotel-")) return response.status(200).end();
   try {
