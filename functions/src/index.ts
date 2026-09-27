@@ -183,7 +183,7 @@ function isValidEmail(value: string | null | undefined): value is string {
 
 async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   const client = supabase();
-  const { data: invoice, error: invoiceError } = await client.from("books_invoices").select("id,invoice_number,issue_date,due_date,currency_code,subtotal,tax_amount,total,organization_id,contact_id,receipt_storage_key").eq("id", invoiceId).single();
+  const { data: invoice, error: invoiceError } = await client.from("books_invoices").select("id,invoice_number,issue_date,due_date,currency_code,subtotal,tax_amount,other_charges,total_due,organization_id,contact_id,receipt_storage_key,notes").eq("id", invoiceId).single();
   if (invoiceError || !invoice) throw invoiceError || new Error("Invoice not found");
   if (!invoice.contact_id) throw new Error("Paid invoice has no customer contact");
   const [{ data: organization, error: organizationError }, { data: contact, error: contactError }, { data: lines, error: linesError }] = await Promise.all([
@@ -208,16 +208,19 @@ async function createInvoicePdf(invoiceId: string): Promise<InvoiceDocument> {
   document.fontSize(10).text(`Issued: ${invoice.issue_date}`).text(`Due: ${invoice.due_date}`);
   document.moveDown();
   document.fontSize(12).text(`Bill to: ${contact.name}`);
+  if (contact.email) document.fontSize(10).text(contact.email);
   if (contact.tax_id) document.fontSize(10).text(`Tax ID: ${contact.tax_id}`);
+  if (invoice.notes) document.fontSize(10).text(invoice.notes);
   document.moveDown();
   document.fontSize(11).text("Description").text("Amount", { align: "right" });
   for (const line of lines || []) {
     document.fontSize(10).text(`${line.description} (${line.quantity} × ${line.unit_price})`).text(`${line.line_total} ${invoice.currency_code}`, { align: "right" });
   }
   document.moveDown();
-  document.text(`Subtotal: ${invoice.subtotal} ${invoice.currency_code}`, { align: "right" });
-  document.text(`Tax: ${invoice.tax_amount} ${invoice.currency_code}`, { align: "right" });
-  document.fontSize(13).text(`Total: ${invoice.total} ${invoice.currency_code}`, { align: "right" });
+  document.text(`Taxable accommodation and services: ${invoice.subtotal} ${invoice.currency_code}`, { align: "right" });
+  document.text(`VAT: ${invoice.tax_amount} ${invoice.currency_code}`, { align: "right" });
+  if (Number(invoice.other_charges) > 0) document.text(`Local Hotel Tax and other charges: ${invoice.other_charges} ${invoice.currency_code}`, { align: "right" });
+  document.fontSize(13).text(`Total: ${invoice.total_due} ${invoice.currency_code}`, { align: "right" });
   document.end();
   return { buffer: await completed, fileName: invoice.receipt_storage_key || `books/invoices/${invoice.organization_id}/${invoice.invoice_number}.pdf`, recipient: isValidEmail(contact?.email) ? contact.email.trim() : null, subject: `Your Invoice Receipt - ${invoice.invoice_number}`, invoiceNumber: invoice.invoice_number, organizationId: invoice.organization_id };
 }
