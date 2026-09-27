@@ -194,14 +194,13 @@ const createBooking: RequestHandler = async (request, response) => {
     if (!body.accessToken || body.accessToken.length < 32 || body.accessToken.length > 256) throw new HotelBookingError("Booking access credential is invalid");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !Number.isInteger(body.guestCount) || !Number.isInteger(body.roomCount)) throw new HotelBookingError("Enter valid guest and room details");
     if (!Array.isArray(body.preferences) || body.preferences.some((value) => typeof value !== "string")) throw new HotelBookingError("Room preferences are invalid");
+    const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
+    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
     const ratesSnapshot = await fetchAndStoreRates();
     const selectedRoom = (await readService<Array<{ currency_code: string }>>(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
     if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
     const currency = selectedRoom.currency_code.trim().toUpperCase();
     if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
-
-    const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
-    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
 
     const rows = await callServiceRpc<Array<{ booking_id: string; confirmation_number: string; total_amount: number; currency_code: string; expires_at: string }>>(
       "create_hotel_booking",
@@ -349,6 +348,25 @@ const verifyHotelPayment = async (transactionId: string, txRef: string, accessTo
 
 export const createHotelBooking = createBooking;
 export const createHotelPaymentSession = createPaymentSession;
+
+export const cancelHotelBookingHold: RequestHandler = async (request, response) => {
+  try {
+    const { bookingId, accessToken } = request.body as { bookingId?: string; accessToken?: string };
+    if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId) || !accessToken || accessToken.length < 32 || accessToken.length > 256) {
+      throw new HotelBookingError("Booking cancellation details are invalid");
+    }
+    const tokenHash = createHash("sha256").update(accessToken).digest("hex");
+    const cancelled = await callServiceRpc<boolean>("cancel_hotel_booking_hold", {
+      target_booking_id: bookingId,
+      target_access_token_hash: tokenHash,
+    });
+    response.json({ cancelled });
+  } catch (error) {
+    response.status(error instanceof HotelBookingError ? error.status : 503).json({
+      error: error instanceof Error ? error.message : "Unable to release reservation hold",
+    });
+  }
+};
 
 export const verifyHotelBookingPayment: RequestHandler = async (request, response) => {
   try {

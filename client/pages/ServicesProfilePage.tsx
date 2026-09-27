@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { BillingTab } from "./components/BillingTab";
 import { supabase } from "../lib/supabase";
+import { useToast } from "../hooks/use-toast";
 import {
   Card,
   CardContent,
@@ -67,6 +68,7 @@ import { format, addDays } from "date-fns";
 
 const ServicesProfilePage = () => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("dashboard");
   const [isEditing, setIsEditing] = useState(false);
   const [showPerformanceDetails, setShowPerformanceDetails] = useState(false);
@@ -118,12 +120,14 @@ const ServicesProfilePage = () => {
                            fieldName === 'organizationName' ? 'organization_name' :
                            fieldName === 'hotelStarRating' ? 'hotel_star_rating' : fieldName;
 
-        await supabase
+        const { error } = await supabase
           .from("user_profiles")
           .update({ [dbFieldName]: value })
           .eq("user_id", userIdRef.current);
+        if (error) throw error;
       } catch (error) {
         console.error(`Error saving ${fieldName}:`, error);
+        toast({ title: "Profile changes could not be saved", description: "Check your connection and try again.", variant: "destructive" });
       }
     }, 500);
   };

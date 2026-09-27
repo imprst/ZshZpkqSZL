@@ -122,6 +122,13 @@ const BookingCheckoutModal = ({ isOpen, onClose, roomData, checkIn, checkOut, gu
   };
 
   const resetAndClose = () => {
+    if (bookingQuote) {
+      void fetch("/api/hotel-bookings/cancel-hold", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bookingId: bookingQuote.booking_id, accessToken: accessToken.current }),
+      }).catch(() => undefined);
+    }
     setStep("details");
     setGuestInfo({ firstName: "", lastName: "", email: "", phone: "" });
     setBookingQuote(null);
