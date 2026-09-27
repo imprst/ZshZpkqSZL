@@ -702,13 +702,13 @@ const createBooking = async (request, response) => {
     if (!body.accessToken || body.accessToken.length < 32 || body.accessToken.length > 256) throw new HotelBookingError("Booking access credential is invalid");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !Number.isInteger(body.guestCount) || !Number.isInteger(body.roomCount)) throw new HotelBookingError("Enter valid guest and room details");
     if (!Array.isArray(body.preferences) || body.preferences.some((value) => typeof value !== "string")) throw new HotelBookingError("Room preferences are invalid");
+    const rateLimitAllowed = await callServiceRpc("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
+    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
     const ratesSnapshot = await fetchAndStoreRates();
     const selectedRoom = (await readService(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
     if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
     const currency = selectedRoom.currency_code.trim().toUpperCase();
     if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
-    const rateLimitAllowed = await callServiceRpc("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
-    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
     const rows = await callServiceRpc(
       "create_hotel_booking",
       {
@@ -752,31 +752,27 @@ const createPaymentSession = async (request, response) => {
     if (booking.booking_status !== "pending" || !booking.expires_at || new Date(booking.expires_at).getTime() <= Date.now()) {
       throw new HotelBookingError("This reservation hold has expired. Select the room again to start a new booking.", 409);
     }
-    const { supabaseUrl } = configuration();
-    const activeResponse = await fetch(
-      `${supabaseUrl}/rest/v1/hotel_payment_attempts?booking_id=eq.${encodeURIComponent(booking.id)}&status=in.(initiated,redirected)&select=id,booking_id,tx_ref,transaction_id,amount,currency_code,status,payment_url,created_at&order=created_at.desc&limit=1`,
-      { headers: serviceHeaders() }
-    );
-    if (!activeResponse.ok) throw new Error("Unable to retrieve payment attempts");
-    const [active] = await activeResponse.json();
-    if (active?.status === "redirected" && active.payment_url) {
-      response.json({ paymentUrl: active.payment_url, txRef: active.tx_ref, bookingId: booking.id });
-      return;
-    }
-    if (active?.status === "initiated" && Date.now() - new Date(active.created_at).getTime() < 12e4) {
-      throw new HotelBookingError("Secure checkout is being prepared. Try again in a moment.", 409);
-    }
-    if (active) await writeService(`hotel_payment_attempts?id=eq.${encodeURIComponent(active.id)}`, "PATCH", { status: "expired" });
     const secretKey = process.env.FLUTTERWAVE_SECRET_KEY;
     if (!secretKey) throw new Error("Flutterwave payment configuration is incomplete");
-    txRef = `hotel-${booking.confirmation_number}-${randomUUID()}`;
-    await writeService("hotel_payment_attempts", "POST", {
-      booking_id: booking.id,
-      tx_ref: txRef,
-      amount: Number(booking.total_amount),
-      currency_code: booking.currency_code,
-      status: "initiated"
-    });
+    const requestedTxRef = `hotel-${booking.confirmation_number}-${randomUUID()}`;
+    const attempts = await callServiceRpc(
+      "create_hotel_payment_attempt",
+      {
+        target_booking_id: booking.id,
+        target_access_token_hash: tokenHash,
+        target_tx_ref: requestedTxRef
+      }
+    );
+    const active = attempts[0];
+    if (!active) throw new Error("Payment attempt was not returned after creation");
+    if (active.attempt_status === "redirected" && active.attempt_payment_url) {
+      response.json({ paymentUrl: active.attempt_payment_url, txRef: active.attempt_tx_ref, bookingId: booking.id });
+      return;
+    }
+    if (active.attempt_tx_ref !== requestedTxRef) {
+      throw new HotelBookingError("Secure checkout is being prepared. Try again in a moment.", 409);
+    }
+    txRef = active.attempt_tx_ref;
     const currency = booking.currency_code.trim().toUpperCase();
     const flutterwaveResponse = await fetch(`${flutterwaveBaseUrl}/payments`, {
       method: "POST",
@@ -844,6 +840,52 @@ const verifyHotelPayment = async (transactionId, txRef, accessToken) => {
 };
 const createHotelBooking = createBooking;
 const createHotelPaymentSession = createPaymentSession;
+const recoverHotelBooking = async (request, response) => {
+  try {
+    const { bookingId, accessToken } = request.body;
+    if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId) || !accessToken || accessToken.length < 32 || accessToken.length > 256) {
+      throw new HotelBookingError("Booking recovery details are invalid");
+    }
+    const booking = await getBooking(bookingId);
+    if (createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) {
+      throw new HotelBookingError("Booking access could not be verified", 403);
+    }
+    response.json({
+      bookingId: booking.id,
+      confirmationNumber: booking.confirmation_number,
+      bookingStatus: booking.booking_status,
+      paymentStatus: booking.payment_status,
+      currencyCode: booking.currency_code.trim(),
+      totalAmount: Number(booking.total_amount),
+      checkIn: booking.check_in,
+      checkOut: booking.check_out,
+      nights: Number(booking.nights),
+      expiresAt: booking.expires_at
+    });
+  } catch (error) {
+    response.status(error instanceof HotelBookingError ? error.status : 503).json({
+      error: error instanceof Error ? error.message : "Unable to retrieve this reservation"
+    });
+  }
+};
+const cancelHotelBookingHold = async (request, response) => {
+  try {
+    const { bookingId, accessToken } = request.body;
+    if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId) || !accessToken || accessToken.length < 32 || accessToken.length > 256) {
+      throw new HotelBookingError("Booking cancellation details are invalid");
+    }
+    const tokenHash = createHash("sha256").update(accessToken).digest("hex");
+    const cancelled = await callServiceRpc("cancel_hotel_booking_hold", {
+      target_booking_id: bookingId,
+      target_access_token_hash: tokenHash
+    });
+    response.json({ cancelled });
+  } catch (error) {
+    response.status(error instanceof HotelBookingError ? error.status : 503).json({
+      error: error instanceof Error ? error.message : "Unable to release reservation hold"
+    });
+  }
+};
 const verifyHotelBookingPayment = async (request, response) => {
   try {
     const { transactionId, txRef, accessToken } = request.body;
@@ -923,6 +965,8 @@ function createServer() {
   app2.post("/api/payments/special-events/cancel", cancelSpecialEventPayment);
   app2.post("/api/payments/special-events/webhook", handleSpecialEventWebhook);
   app2.post("/api/hotel-bookings/create", createHotelBooking);
+  app2.post("/api/hotel-bookings/recover", recoverHotelBooking);
+  app2.post("/api/hotel-bookings/cancel-hold", cancelHotelBookingHold);
   app2.post("/api/payments/hotel/session", createHotelPaymentSession);
   app2.post("/api/payments/hotel/verify", verifyHotelBookingPayment);
   app2.post("/api/payments/hotel/cancel", cancelHotelBookingPayment);
