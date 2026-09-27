@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { Badge } from "../components/ui/badge";
@@ -171,12 +171,12 @@ const BooksPage = () => {
     const account = accountById.get(line.account_id);
     return account?.type === type ? sum + Number(line[side]) : sum;
   }, 0);
-  const revenue = ledgerTotal("income", "credit") || visibleInvoices.filter((invoice) => invoice.status !== "void").reduce((sum, invoice) => sum + Number(invoice.subtotal), 0);
-  const expensesTotal = ledgerTotal("expense", "debit") || visibleExpenses.reduce((sum, expense) => sum + Number(expense.amount) + Number(expense.tax_amount), 0);
+  const revenue = visibleInvoices.filter((invoice) => ["sent", "overdue", "paid"].includes(invoice.status)).reduce((sum, invoice) => sum + Number(invoice.subtotal), 0);
+  const expensesTotal = visibleExpenses.reduce((sum, expense) => sum + Number(expense.amount) + Number(expense.tax_amount), 0);
   const assets = ledgerTotal("asset", "debit") - ledgerTotal("asset", "credit");
   const liabilities = ledgerTotal("liability", "credit") - ledgerTotal("liability", "debit");
   const equity = ledgerTotal("equity", "credit") - ledgerTotal("equity", "debit") + revenue - expensesTotal;
-  const openInvoices = visibleInvoices.filter((invoice) => invoice.status !== "paid" && invoice.status !== "void");
+  const openInvoices = visibleInvoices.filter((invoice) => invoice.status === "sent" || invoice.status === "overdue");
   const receivable = openInvoices.reduce((sum, invoice) => sum + Number(invoice.total_due), 0);
   const overdue = visibleInvoices.filter((invoice) => invoice.status === "overdue" || (invoice.status !== "paid" && invoice.due_date < today)).length;
   const contactName = (id: string | null) => contacts.find((contact) => contact.id === id)?.name || "Unassigned";
