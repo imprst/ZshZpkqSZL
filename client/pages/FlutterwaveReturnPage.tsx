@@ -14,7 +14,7 @@ type PaymentResult =
 
 const readHotelAccess = () => {
   try {
-    const stored = sessionStorage.getItem("hotel-booking-access");
+    const stored = localStorage.getItem("hotel-booking-access");
     if (!stored) return null;
     const value = JSON.parse(stored) as { bookingId?: string; accessToken?: string; confirmationNumber?: string };
     return value.bookingId && value.accessToken ? value : null;
@@ -83,14 +83,14 @@ const FlutterwaveReturnPage = () => {
         if (!response.ok || (!orderNumber && !hotelBooking)) throw new Error(payload?.error || `Payment could not be confirmed (HTTP ${response.status}).`);
         if ((eventPayment && payload?.paymentStatus === "manual_review") || (hotelBooking && (payload?.booking_status === "manual_review" || payload?.payment_status === "manual_review"))) {
           clearPendingCheckout();
-          if (hotelBooking) sessionStorage.removeItem("hotel-booking-access");
+          if (hotelBooking) localStorage.removeItem("hotel-booking-access");
           if (active) setResult({ status: "review", orderNumber: orderNumber || "Review required", hotelBooking });
           return;
         }
         const paymentStatus = hotelBooking ? payload?.payment_status || payload?.paymentStatus : payload?.paymentStatus;
         if (paymentStatus !== "paid") throw new Error(payload?.error || "Payment could not be confirmed.");
         clearPendingCheckout();
-        if (hotelBooking) sessionStorage.removeItem("hotel-booking-access");
+        if (hotelBooking) localStorage.removeItem("hotel-booking-access");
         if (active) setResult({ status: "success", orderNumber: orderNumber || "Confirmed", eventPayment, hotelBooking });
       } catch (error) {
         if (active) setResult({ status: "error", message: error instanceof Error ? error.message : "Payment could not be confirmed." });
@@ -138,7 +138,6 @@ const FlutterwaveReturnPage = () => {
   };
   const returnToPage = () => {
     clearPendingCheckout();
-    if (hotelBooking) sessionStorage.removeItem("hotel-booking-access");
     navigate(eventPayment ? "/events?tab=my-tickets" : returnPath, { replace: true });
   };
 

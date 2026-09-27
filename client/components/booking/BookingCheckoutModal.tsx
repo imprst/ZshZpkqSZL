@@ -107,7 +107,7 @@ const BookingCheckoutModal = ({ isOpen, onClose, roomData, checkIn, checkOut, gu
           expires_at: created.expires_at,
         };
         setBookingQuote(currentBooking);
-        sessionStorage.setItem("hotel-booking-access", JSON.stringify({ bookingId: currentBooking.booking_id, accessToken: accessToken.current, confirmationNumber: currentBooking.confirmation_number }));
+        localStorage.setItem("hotel-booking-access", JSON.stringify({ bookingId: currentBooking.booking_id, accessToken: accessToken.current, confirmationNumber: currentBooking.confirmation_number }));
         return;
       }
       if (new Date(currentBooking.expires_at).getTime() <= Date.now()) throw new Error("Your room hold expired. Close this window and select the room again.");
@@ -127,13 +127,14 @@ const BookingCheckoutModal = ({ isOpen, onClose, roomData, checkIn, checkOut, gu
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ bookingId: bookingQuote.booking_id, accessToken: accessToken.current }),
+      }).then((response) => {
+        if (response.ok) localStorage.removeItem("hotel-booking-access");
       }).catch(() => undefined);
     }
     setStep("details");
     setGuestInfo({ firstName: "", lastName: "", email: "", phone: "" });
     setBookingQuote(null);
     setErrorMessage("");
-    sessionStorage.removeItem("hotel-booking-access");
     idempotencyKey.current = crypto.randomUUID();
     accessToken.current = makeAccessToken();
     onClose();
@@ -158,7 +159,7 @@ const BookingCheckoutModal = ({ isOpen, onClose, roomData, checkIn, checkOut, gu
           <div className="rounded-lg border border-sheraton-gold/30 bg-sheraton-gold/5 p-4"><div className="flex gap-3"><LockKeyhole className="mt-0.5 h-5 w-5 shrink-0 text-sheraton-gold" /><div><h3 className="font-medium">Secure payment with Flutterwave</h3><p className="mt-1 text-sm text-muted-foreground">You’ll be redirected to Flutterwave’s secure payment page. Card details are never collected or stored by the hotel booking page.{currency === "UGX" ? " Mobile money and card payment are supported." : " Card payment is supported for this currency."}</p></div></div></div>
           {bookingQuote && <div className="rounded-lg bg-muted/40 p-3 text-sm"><div className="flex justify-between gap-3"><span className="text-muted-foreground">Reservation hold</span><span className="font-medium">Expires {new Date(bookingQuote.expires_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span></div><div className="mt-1 flex justify-between gap-3"><span className="text-muted-foreground">Confirmation reference</span><span className="font-mono font-medium">{bookingQuote.confirmation_number}</span></div><p className="mt-1 text-xs text-muted-foreground">Rates and tax calculation are locked for this reservation.</p></div>}
           {errorMessage && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><AlertCircle className="h-4 w-4 shrink-0" />{errorMessage}</div>}
-          <div className="flex gap-3"><Button type="button" variant="outline" className="flex-1" onClick={() => setStep("details")} disabled={loading || Boolean(bookingQuote)}><ArrowLeft className="mr-2 h-4 w-4" />Guest details</Button><Button type="submit" className="flex-1 sheraton-gradient text-white" disabled={loading}>{loading ? bookingQuote ? "Preparing secure checkout…" : "Calculating secure total…" : bookingQuote ? `Continue to payment · ${money(bookingQuote.total_amount, currency)}` : "Calculate total & hold room"}<ArrowRight className="ml-2 h-4 w-4" /></Button></div>
+          <div className="flex flex-wrap gap-3">{bookingQuote ? <Button type="button" variant="outline" className="flex-1" onClick={resetAndClose} disabled={loading}>Release room hold</Button> : <Button type="button" variant="outline" className="flex-1" onClick={() => setStep("details")} disabled={loading}><ArrowLeft className="mr-2 h-4 w-4" />Guest details</Button>}<Button type="submit" className="flex-1 sheraton-gradient text-white" disabled={loading}>{loading ? bookingQuote ? "Preparing secure checkout…" : "Calculating secure total…" : bookingQuote ? `Continue to payment · ${money(bookingQuote.total_amount, currency)}` : "Calculate total & hold room"}<ArrowRight className="ml-2 h-4 w-4" /></Button></div>
           <p className="flex items-center justify-center gap-1 text-center text-xs text-muted-foreground"><CheckCircle className="h-3.5 w-3.5 text-green-600" />{bookingQuote ? "Review the full tax breakdown above before continuing to Flutterwave." : "We’ll reserve availability for 20 minutes while you review your final total."}</p>
         </form>}
       </DialogContent>

@@ -20,6 +20,7 @@ import {
   createHotelPaymentSession,
   getExchangeRates,
   handleHotelBookingWebhook,
+  recoverHotelBooking,
   verifyHotelBookingPayment,
 } from "./routes/hotelBookings.js";
 
@@ -46,6 +47,7 @@ export function createServer() {
   app.post("/api/payments/special-events/cancel", cancelSpecialEventPayment);
   app.post("/api/payments/special-events/webhook", handleSpecialEventWebhook);
   app.post("/api/hotel-bookings/create", createHotelBooking);
+  app.post("/api/hotel-bookings/recover", recoverHotelBooking);
   app.post("/api/hotel-bookings/cancel-hold", cancelHotelBookingHold);
   app.post("/api/payments/hotel/session", createHotelPaymentSession);
   app.post("/api/payments/hotel/verify", verifyHotelBookingPayment);

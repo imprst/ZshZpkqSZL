@@ -257,12 +257,22 @@ create table if not exists public.hotel_bookings (
   idempotency_key uuid not null unique,
   access_token_hash text not null,
   books_invoice_id uuid references public.books_invoices(id) on delete set null,
+  books_accounting_status text not null default 'pending' check (books_accounting_status in ('pending', 'posted', 'failed')),
+  books_accounting_error text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   check (check_out > check_in),
   check (total_amount >= 0),
   check (length(access_token_hash) = 64)
 );
+
+alter table public.hotel_bookings
+  add column if not exists books_accounting_status text not null default 'pending' check (books_accounting_status in ('pending', 'posted', 'failed')),
+  add column if not exists books_accounting_error text;
+
+update public.hotel_bookings
+   set books_accounting_status = 'posted', books_accounting_error = null
+ where books_invoice_id is not null and books_accounting_status <> 'posted';
 
 create table if not exists public.hotel_payment_attempts (
   id uuid primary key default gen_random_uuid(),
@@ -538,6 +548,43 @@ $$;
 revoke all on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, jsonb) from public, anon, authenticated;
 grant execute on function public.create_hotel_booking(uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, jsonb) to service_role;
 
+create or replace function public.create_hotel_payment_attempt(
+  target_booking_id uuid,
+  target_access_token_hash text,
+  target_tx_ref text
+)
+returns table (attempt_id uuid, attempt_tx_ref text, attempt_status text, attempt_payment_url text)
+language plpgsql security definer set search_path = public
+as $$
+declare
+  selected_booking public.hotel_bookings%rowtype;
+  active_attempt public.hotel_payment_attempts%rowtype;
+  created_attempt public.hotel_payment_attempts%rowtype;
+begin
+  select * into selected_booking from public.hotel_bookings where id = target_booking_id for update;
+  if not found or selected_booking.access_token_hash <> target_access_token_hash then
+    raise exception 'Booking access could not be verified';
+  end if;
+  if selected_booking.booking_status <> 'pending' or selected_booking.payment_status <> 'pending'
+     or selected_booking.expires_at is null or selected_booking.expires_at <= now() then
+    raise exception 'This reservation hold has expired. Select the room again to start a new booking.';
+  end if;
+  select * into active_attempt from public.hotel_payment_attempts
+   where booking_id = selected_booking.id and status in ('initiated', 'redirected')
+   order by created_at desc limit 1;
+  if found then
+    return query select active_attempt.id, active_attempt.tx_ref, active_attempt.status, active_attempt.payment_url;
+    return;
+  end if;
+  insert into public.hotel_payment_attempts (booking_id, tx_ref, amount, currency_code, status)
+  values (selected_booking.id, target_tx_ref, selected_booking.total_amount, selected_booking.currency_code, 'initiated')
+  returning * into created_attempt;
+  return query select created_attempt.id, created_attempt.tx_ref, created_attempt.status, created_attempt.payment_url;
+end;
+$$;
+revoke all on function public.create_hotel_payment_attempt(uuid, text, text) from public, anon, authenticated;
+grant execute on function public.create_hotel_payment_attempt(uuid, text, text) to service_role;
+
 create or replace function public.cancel_hotel_booking_hold(target_booking_id uuid, target_access_token_hash text)
 returns boolean language plpgsql security definer set search_path = public
 as $$
@@ -710,8 +757,11 @@ begin
   select owner_id into owner_user_id from public.books_organizations where id = invoice_row.organization_id;
   insert into public.books_accounts (organization_id, code, name, type, is_system)
   values
+    (invoice_row.organization_id, '1000', 'Cash and bank', 'asset', true),
+    (invoice_row.organization_id, '1100', 'Accounts receivable', 'asset', true),
     (invoice_row.organization_id, '2100', 'VAT payable', 'liability', true),
-    (invoice_row.organization_id, '2200', 'Local hotel tax payable', 'liability', true)
+    (invoice_row.organization_id, '2200', 'Local hotel tax payable', 'liability', true),
+    (invoice_row.organization_id, '4000', 'Sales revenue', 'income', true)
   on conflict (organization_id, code) do nothing;
 
   select id into cash_receivable_id from public.books_accounts where organization_id = invoice_row.organization_id and code = '1100' and type = 'asset';
@@ -755,9 +805,18 @@ declare
   organization_name text;
   room_name text;
 begin
-  if new.payment_status <> 'paid' or old.payment_status = 'paid' or new.books_invoice_id is not null then
+  if new.payment_status <> 'paid' or new.books_invoice_id is not null then
     return new;
   end if;
+
+  insert into public.books_accounts (organization_id, code, name, type, is_system)
+  values
+    (new.organization_id, '1000', 'Cash and bank', 'asset', true),
+    (new.organization_id, '1100', 'Accounts receivable', 'asset', true),
+    (new.organization_id, '2100', 'VAT payable', 'liability', true),
+    (new.organization_id, '2200', 'Local hotel tax payable', 'liability', true),
+    (new.organization_id, '4000', 'Sales revenue', 'income', true)
+  on conflict (organization_id, code) do nothing;
 
   select name into organization_name from public.books_organizations where id = new.organization_id;
   select name into room_name from public.hotel_rooms where id = new.room_id;
@@ -791,7 +850,7 @@ begin
     tax_rate_id, tax_rate_percentage, other_charges, status, notes
   ) values (
     new.organization_id, customer_contact_id, 'HOTEL-' || new.confirmation_number, current_date, current_date,
-    new.currency_code, new.taxable_subtotal, vat_rate_id, 18, new.lht_amount, 'paid',
+    new.currency_code, new.taxable_subtotal, vat_rate_id, 18, new.lht_amount, 'draft',
     'Room reservation ' || new.confirmation_number || ' at ' || coalesce(organization_name, 'Hotel') ||
     '. Room: ' || coalesce(room_name, 'Room') || '. Check-in ' || new.check_in::text ||
     ', check-out ' || new.check_out::text || '. Hotel classification: ' || new.hotel_classification || ' stars.'
@@ -803,13 +862,48 @@ begin
     insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
     values (invoice_uuid, new.organization_id, 'Local Hotel Tax', 1, new.lht_amount);
   end if;
+  update public.books_invoices set status = 'paid' where id = invoice_uuid;
   perform public.post_hotel_invoice_recognition(invoice_uuid);
-  update public.hotel_bookings set books_invoice_id = invoice_uuid where id = new.id;
+  update public.hotel_bookings
+     set books_invoice_id = invoice_uuid, books_accounting_status = 'posted', books_accounting_error = null
+   where id = new.id;
+  return new;
+exception when others then
+  update public.hotel_bookings
+     set books_accounting_status = 'failed', books_accounting_error = left(sqlerrm, 2000)
+   where id = new.id;
   return new;
 end;
 $$;
 
 revoke all on function public.post_paid_hotel_booking_to_books() from public;
+
+create or replace function public.retry_hotel_booking_accounting(target_booking_id uuid)
+returns text language plpgsql security definer set search_path = public
+as $$
+declare selected_booking public.hotel_bookings%rowtype;
+begin
+  select * into selected_booking from public.hotel_bookings where id = target_booking_id for update;
+  if not found then raise exception 'Hotel booking was not found'; end if;
+  if not exists (
+    select 1 from public.user_profiles up
+    join public.books_memberships bm on bm.user_id = up.user_id
+    where up.user_id = auth.uid() and up.role = 'manager'
+      and bm.organization_id = selected_booking.organization_id and bm.role in ('owner', 'admin')
+  ) then raise exception 'Not authorized to retry this hotel invoice'; end if;
+  if selected_booking.payment_status <> 'paid' then raise exception 'Only paid reservations can be posted to Books'; end if;
+  if selected_booking.books_invoice_id is not null then return 'posted'; end if;
+  update public.hotel_bookings
+     set payment_status = 'paid', books_accounting_status = 'pending', books_accounting_error = null
+   where id = selected_booking.id;
+  select books_accounting_status into selected_booking.books_accounting_status
+    from public.hotel_bookings where id = selected_booking.id;
+  return selected_booking.books_accounting_status;
+end;
+$$;
+revoke all on function public.retry_hotel_booking_accounting(uuid) from public, anon;
+grant execute on function public.retry_hotel_booking_accounting(uuid) to authenticated;
+
 drop trigger if exists hotel_booking_paid_books on public.hotel_bookings;
 create trigger hotel_booking_paid_books
 after update of payment_status on public.hotel_bookings
