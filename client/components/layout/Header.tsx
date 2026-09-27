@@ -363,10 +363,22 @@ const Header = () => {
       title: "Books",
       items: [
         {
-          title: "Accounting workspace",
+          title: "Accounting workspace · UGX",
           href: "/books",
           icon: BookOpen,
-          description: "Customers, invoices, expenses, and reports",
+          description: "UGX records, invoices, expenses, and reports",
+        },
+        {
+          title: "Accounting workspace · USD",
+          href: "/books?view=usd",
+          icon: BookOpen,
+          description: "USD-only invoices, expenses, and reports",
+        },
+        {
+          title: "Consolidated financials",
+          href: "/books?view=consolidated",
+          icon: BarChart3,
+          description: "Compare currencies and convert financial totals",
         },
       ],
     },

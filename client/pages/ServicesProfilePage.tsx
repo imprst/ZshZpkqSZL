@@ -78,6 +78,7 @@ const ServicesProfilePage = () => {
   // User data from database
   const [userData, setUserData] = useState({
     organizationName: "",
+    hotelStarRating: "",
     firstName: "",
     lastName: "",
     email: "",
@@ -101,7 +102,7 @@ const ServicesProfilePage = () => {
   });
 
   // Save field to database with debounce
-  const saveFieldToDatabase = async (fieldName: string, value: string) => {
+  const saveFieldToDatabase = async (fieldName: string, value: string | null) => {
     if (!userIdRef.current) return;
 
     // Clear existing timeout for this field
@@ -114,7 +115,8 @@ const ServicesProfilePage = () => {
       try {
         const dbFieldName = fieldName === 'firstName' ? 'first_name' :
                            fieldName === 'lastName' ? 'last_name' :
-                           fieldName === 'organizationName' ? 'organization_name' : fieldName;
+                           fieldName === 'organizationName' ? 'organization_name' :
+                           fieldName === 'hotelStarRating' ? 'hotel_star_rating' : fieldName;
 
         await supabase
           .from("user_profiles")
@@ -184,6 +186,7 @@ const ServicesProfilePage = () => {
         setUserData((prev) => ({
           ...prev,
           organizationName: resolvedProfile?.organization_name || metadata.organization_name || "",
+          hotelStarRating: resolvedProfile?.hotel_star_rating ? String(resolvedProfile.hotel_star_rating) : "",
           firstName: resolvedProfile?.first_name || metadata.first_name || "",
           lastName: resolvedProfile?.last_name || metadata.last_name || "",
           email: user.email || "",
@@ -1152,18 +1155,41 @@ const ServicesProfilePage = () => {
               <CardContent className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {userRole === 'manager' && (
-                    <div className="space-y-2 md:col-span-2">
-                      <Label htmlFor="organizationName">Organization Name *</Label>
-                      <Input
-                        id="organizationName"
-                        value={userData.organizationName}
-                        onChange={(e) => {
-                          setUserData({ ...userData, organizationName: e.target.value });
-                          saveFieldToDatabase("organizationName", e.target.value);
-                        }}
-                        disabled={!isEditing}
-                      />
-                    </div>
+                    <>
+                      <div className="space-y-2 md:col-span-2">
+                        <Label htmlFor="organizationName">Hotel / Organization Name *</Label>
+                        <Input
+                          id="organizationName"
+                          value={userData.organizationName}
+                          onChange={(e) => {
+                            setUserData({ ...userData, organizationName: e.target.value });
+                            saveFieldToDatabase("organizationName", e.target.value);
+                          }}
+                          disabled={!isEditing}
+                        />
+                      </div>
+                      <div className="space-y-2 md:col-span-2">
+                        <Label htmlFor="hotelStarRating">Official hotel star classification</Label>
+                        <Select
+                          value={userData.hotelStarRating || "unclassified"}
+                          onValueChange={(value) => {
+                            const rating = value === "unclassified" ? "" : value;
+                            setUserData({ ...userData, hotelStarRating: rating });
+                            saveFieldToDatabase("hotelStarRating", rating || null);
+                          }}
+                          disabled={!isEditing}
+                        >
+                          <SelectTrigger id="hotelStarRating"><SelectValue placeholder="Select classification" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="unclassified">Not classified</SelectItem>
+                            {[1, 2, 3, 4, 5].map((rating) => (
+                              <SelectItem key={rating} value={String(rating)}>{rating}-star hotel</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">This classification determines the Local Hotel Tax charged on guest room bookings.</p>
+                      </div>
+                    </>
                   )}
                   <div className="space-y-2">
                     <Label htmlFor="firstName">First Name *</Label>

@@ -1,76 +1,45 @@
-import React, { useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Separator } from "../ui/separator";
+import { FormEvent, useRef, useState } from "react";
+import { format } from "date-fns";
+import { AlertCircle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle, CreditCard, LockKeyhole, Mail, Phone, User } from "lucide-react";
 import { Badge } from "../ui/badge";
-import { Switch } from "../ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
-import {
-  CreditCard,
-  MapPin,
-  Clock,
-  User,
-  Phone,
-  Mail,
-  Receipt,
-  CheckCircle,
-  AlertCircle,
-  Crown,
-  Gift,
-  Star,
-  Hotel,
-  Car,
-  Building,
-  Wallet,
-  Shield,
-  ArrowLeft,
-  ArrowRight,
-  Calendar,
-  Users,
-  Bed,
-  Eye,
-  EyeOff,
-  Copy,
-  Bell,
-  QrCode,
-  Plane,
-  Utensils,
-  Bath,
-  Calendar as CalendarIcon,
-} from "lucide-react";
+import { Button } from "../ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Separator } from "../ui/separator";
 
-interface RoomData {
+type RoomData = {
   id: string;
   name: string;
-  price: number;
-  originalPrice: number;
-  image: string;
-  size: string;
-  guests: string;
-  features: string[];
-  description: string;
-}
+  nightly_rate: number;
+  currency_code: string;
+  image_url: string | null;
+  size_sqm: number | null;
+  max_guests: number;
+};
+
+type BookingQuote = {
+  booking_id: string;
+  confirmation_number: string;
+  currency_code: string;
+  nights: number;
+  nightly_subtotal: number;
+  discount_amount: number;
+  taxable_subtotal: number;
+  vat_amount: number;
+  lht_amount: number;
+  total_amount: number;
+  hotel_classification: number;
+  expires_at: string;
+};
 
 interface BookingCheckoutModalProps {
   isOpen: boolean;
   onClose: () => void;
   roomData: RoomData | null;
-  checkIn: Date | undefined;
-  checkOut: Date | undefined;
+  checkIn?: Date;
+  checkOut?: Date;
   guests: string;
+  roomCount: string;
   preferences: string[];
   specialRequests: string;
   totalNights: number;
@@ -78,925 +47,108 @@ interface BookingCheckoutModalProps {
   savings: number;
 }
 
-const BookingCheckoutModal: React.FC<BookingCheckoutModalProps> = ({
-  isOpen,
-  onClose,
-  roomData,
-  checkIn,
-  checkOut,
-  guests,
-  preferences,
-  specialRequests,
-  totalNights,
-  totalPrice,
-  savings,
-}) => {
-  const [step, setStep] = useState<
-    "details" | "add-ons" | "payment" | "confirmation"
-  >("details");
-  const [guestInfo, setGuestInfo] = useState({
-    firstName: "",
-    lastName: "",
-    email: "",
-    phone: "",
-    address: "",
-    city: "",
-    state: "",
-    zipCode: "",
-    country: "",
-    idType: "",
-    idNumber: "",
-    dateOfBirth: "",
-    nationality: "",
-    company: "",
-    purpose: "leisure",
-  });
-  const [selectedAddOns, setSelectedAddOns] = useState<string[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState<
-    "card" | "pay-at-hotel" | "bank-transfer"
-  >("card");
-  const [paymentDetails, setPaymentDetails] = useState({
-    cardNumber: "",
-    expiryDate: "",
-    cvv: "",
-    cardName: "",
-  });
-  const [showPassword, setShowPassword] = useState(false);
-  const [loyaltyPoints, setLoyaltyPoints] = useState(2150);
-  const [usePoints, setUsePoints] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [bookingConfirmed, setBookingConfirmed] = useState(false);
-  const [confirmationNumber, setConfirmationNumber] = useState("");
-  const [earlyCheckIn, setEarlyCheckIn] = useState(false);
-  const [lateCheckOut, setLateCheckOut] = useState(false);
-  const [newsletter, setNewsletter] = useState(true);
+const money = (value: number, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: currency === "UGX" ? 0 : 2 }).format(value || 0);
+const makeAccessToken = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
-  const addOnServices = [
-    {
-      id: "airport-transfer",
-      name: "Airport Transfer",
-      description: "Luxury car pickup/drop-off service",
-      price: 75,
-      icon: Plane,
-      popular: true,
-    },
-    {
-      id: "spa-package",
-      name: "Welcome Spa Package",
-      description: "60-min massage + spa access",
-      price: 120,
-      icon: Bath,
-      popular: true,
-    },
-    {
-      id: "dining-credit",
-      name: "Dining Credit",
-      description: "$100 credit for hotel restaurants",
-      price: 85,
-      icon: Utensils,
-      popular: false,
-    },
-    {
-      id: "room-upgrade",
-      name: "Guaranteed Room Upgrade",
-      description: "Upgrade to next tier room type",
-      price: 150,
-      icon: Crown,
-      popular: false,
-    },
-    {
-      id: "late-checkout",
-      name: "Late Checkout (4 PM)",
-      description: "Extended checkout until 4:00 PM",
-      price: 50,
-      icon: Clock,
-      popular: false,
-    },
-    {
-      id: "champagne-package",
-      name: "Champagne & Roses",
-      description: "Premium champagne with rose petals",
-      price: 95,
-      icon: Gift,
-      popular: false,
-    },
-  ];
+const BookingCheckoutModal = ({ isOpen, onClose, roomData, checkIn, checkOut, guests, roomCount, preferences, specialRequests, totalNights, totalPrice, savings }: BookingCheckoutModalProps) => {
+  const [step, setStep] = useState<"details" | "payment">("details");
+  const [guestInfo, setGuestInfo] = useState({ firstName: "", lastName: "", email: "", phone: "" });
+  const [bookingQuote, setBookingQuote] = useState<BookingQuote | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const idempotencyKey = useRef(crypto.randomUUID());
+  const accessToken = useRef(makeAccessToken());
+  const currency = bookingQuote?.currency_code || roomData?.currency_code.trim() || "USD";
 
-  const getTaxesAndFees = () => {
-    return Math.round(totalPrice * 0.15);
+  const requestJson = async (url: string, body: unknown) => {
+    const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const payload = await response.json().catch(() => null) as (BookingQuote & { accessToken?: string; paymentUrl?: string; error?: string }) | null;
+    if (!response.ok || !payload) throw new Error(payload?.error || "We could not complete this request. Please try again.");
+    return payload;
   };
 
-  const getAddOnsTotal = () => {
-    return selectedAddOns.reduce((total, addOnId) => {
-      const addOn = addOnServices.find(service => service.id === addOnId);
-      return total + (addOn ? addOn.price : 0);
-    }, 0);
+  const handleStartPayment = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!roomData || !checkIn || !checkOut) return;
+    setLoading(true);
+    setErrorMessage("");
+    try {
+      let currentBooking = bookingQuote;
+      if (!currentBooking) {
+        const created = await requestJson("/api/hotel-bookings/create", {
+          roomId: roomData.id,
+          guest: guestInfo,
+          checkIn: format(checkIn, "yyyy-MM-dd"),
+          checkOut: format(checkOut, "yyyy-MM-dd"),
+          guestCount: Number(guests),
+          roomCount: Number(roomCount),
+          specialRequests,
+          preferences,
+          idempotencyKey: idempotencyKey.current,
+          accessToken: accessToken.current,
+        });
+        currentBooking = {
+          booking_id: created.booking_id,
+          confirmation_number: created.confirmation_number,
+          currency_code: created.currency_code.trim(),
+          nights: Number(created.nights),
+          nightly_subtotal: Number(created.nightly_subtotal),
+          discount_amount: Number(created.discount_amount),
+          taxable_subtotal: Number(created.taxable_subtotal),
+          vat_amount: Number(created.vat_amount),
+          lht_amount: Number(created.lht_amount),
+          total_amount: Number(created.total_amount),
+          hotel_classification: Number(created.hotel_classification),
+          expires_at: created.expires_at,
+        };
+        setBookingQuote(currentBooking);
+      }
+      const session = await requestJson("/api/payments/hotel/session", { bookingId: currentBooking.booking_id, accessToken: accessToken.current });
+      if (!session.paymentUrl) throw new Error("Secure checkout link was not returned. Please try again.");
+      sessionStorage.setItem("hotel-booking-access", JSON.stringify({ bookingId: currentBooking.booking_id, accessToken: accessToken.current, confirmationNumber: currentBooking.confirmation_number }));
+      window.location.assign(session.paymentUrl);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to start secure checkout. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const getPointsDiscount = () => {
-    if (!usePoints) return 0;
-    const maxDiscount = Math.min(loyaltyPoints / 100, totalPrice * 0.15); // 1 point = $0.01, max 15% discount
-    return maxDiscount;
-  };
-
-  const getFinalTotal = () => {
-    return totalPrice + getTaxesAndFees() + getAddOnsTotal() - getPointsDiscount();
-  };
-
-  const handleAddOnToggle = (addOnId: string) => {
-    setSelectedAddOns(prev => 
-      prev.includes(addOnId) 
-        ? prev.filter(id => id !== addOnId)
-        : [...prev, addOnId]
-    );
-  };
-
-  const handleBookingSubmit = async () => {
-    setIsProcessing(true);
-    
-    // Simulate booking processing
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const confirmationNum = `SH${Date.now().toString().slice(-8)}`;
-    setConfirmationNumber(confirmationNum);
-    setBookingConfirmed(true);
-    setIsProcessing(false);
-    setStep("confirmation");
-  };
-
-  const resetModal = () => {
+  const resetAndClose = () => {
     setStep("details");
-    setBookingConfirmed(false);
-    setIsProcessing(false);
-    setGuestInfo({
-      firstName: "",
-      lastName: "",
-      email: "",
-      phone: "",
-      address: "",
-      city: "",
-      state: "",
-      zipCode: "",
-      country: "",
-      idType: "",
-      idNumber: "",
-      dateOfBirth: "",
-      nationality: "",
-      company: "",
-      purpose: "leisure",
-    });
-    setSelectedAddOns([]);
-    setPaymentDetails({
-      cardNumber: "",
-      expiryDate: "",
-      cvv: "",
-      cardName: "",
-    });
-    setUsePoints(false);
-  };
-
-  const handleClose = () => {
-    resetModal();
+    setGuestInfo({ firstName: "", lastName: "", email: "", phone: "" });
+    setBookingQuote(null);
+    setErrorMessage("");
+    idempotencyKey.current = crypto.randomUUID();
+    accessToken.current = makeAccessToken();
     onClose();
   };
 
-  const renderDetailsStep = () => (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Guest Information</h3>
-        <Badge className="bg-sheraton-gold text-sheraton-navy">
-          Primary Guest
-        </Badge>
-      </div>
-
-      {/* Personal Information */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium mb-2">First Name *</label>
-          <Input
-            value={guestInfo.firstName}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, firstName: e.target.value }))
-            }
-            placeholder="Enter first name"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-2">Last Name *</label>
-          <Input
-            value={guestInfo.lastName}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, lastName: e.target.value }))
-            }
-            placeholder="Enter last name"
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium mb-2">Email Address *</label>
-          <Input
-            type="email"
-            value={guestInfo.email}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, email: e.target.value }))
-            }
-            placeholder="Enter email address"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium mb-2">Phone Number *</label>
-          <Input
-            type="tel"
-            value={guestInfo.phone}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, phone: e.target.value }))
-            }
-            placeholder="Enter phone number"
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium mb-2">Date of Birth</label>
-        <Input
-          type="date"
-          value={guestInfo.dateOfBirth}
-          onChange={(e) =>
-            setGuestInfo(prev => ({ ...prev, dateOfBirth: e.target.value }))
-          }
-        />
-      </div>
-
-      {/* Address Information */}
-      <div className="border-t pt-6">
-        <h4 className="text-md font-semibold text-sheraton-navy mb-4">
-          Address Information
-        </h4>
-        <div className="space-y-4">
-          <Input
-            placeholder="Street Address"
-            value={guestInfo.address}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, address: e.target.value }))
-            }
-          />
-          <div className="grid grid-cols-3 gap-4">
-            <Input
-              placeholder="City"
-              value={guestInfo.city}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, city: e.target.value }))
-              }
-            />
-            <Input
-              placeholder="State/Province"
-              value={guestInfo.state}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, state: e.target.value }))
-              }
-            />
-            <Input
-              placeholder="ZIP/Postal Code"
-              value={guestInfo.zipCode}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, zipCode: e.target.value }))
-              }
-            />
-          </div>
-          <Input
-            placeholder="Country"
-            value={guestInfo.country}
-            onChange={(e) =>
-              setGuestInfo(prev => ({ ...prev, country: e.target.value }))
-            }
-          />
-        </div>
-      </div>
-
-      {/* ID and Travel Information */}
-      <div className="border-t pt-6">
-        <h4 className="text-md font-semibold text-sheraton-navy mb-4">
-          Identification & Travel Details
-        </h4>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium mb-2">ID Type</label>
-            <Select value={guestInfo.idType} onValueChange={(value) =>
-              setGuestInfo(prev => ({ ...prev, idType: value }))
-            }>
-              <SelectTrigger>
-                <SelectValue placeholder="Select ID type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="passport">Passport</SelectItem>
-                <SelectItem value="drivers-license">Driver's License</SelectItem>
-                <SelectItem value="national-id">National ID</SelectItem>
-                <SelectItem value="other">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2">ID Number</label>
-            <Input
-              value={guestInfo.idNumber}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, idNumber: e.target.value }))
-              }
-              placeholder="Enter ID number"
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 mt-4">
-          <div>
-            <label className="block text-sm font-medium mb-2">Nationality</label>
-            <Input
-              value={guestInfo.nationality}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, nationality: e.target.value }))
-              }
-              placeholder="Enter nationality"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2">Purpose of Visit</label>
-            <Select value={guestInfo.purpose} onValueChange={(value) =>
-              setGuestInfo(prev => ({ ...prev, purpose: value }))
-            }>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="leisure">Leisure</SelectItem>
-                <SelectItem value="business">Business</SelectItem>
-                <SelectItem value="conference">Conference</SelectItem>
-                <SelectItem value="wedding">Wedding</SelectItem>
-                <SelectItem value="other">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        {guestInfo.purpose === "business" && (
-          <div className="mt-4">
-            <label className="block text-sm font-medium mb-2">Company Name</label>
-            <Input
-              value={guestInfo.company}
-              onChange={(e) =>
-                setGuestInfo(prev => ({ ...prev, company: e.target.value }))
-              }
-              placeholder="Enter company name"
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Preferences */}
-      <div className="bg-gray-50 rounded-lg p-4">
-        <h4 className="font-medium text-sheraton-navy mb-3">Communication Preferences</h4>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="font-medium">Newsletter & Offers</span>
-              <p className="text-sm text-gray-600">Receive exclusive deals and updates</p>
-            </div>
-            <Switch
-              checked={newsletter}
-              onCheckedChange={setNewsletter}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
-          Cancel
-        </Button>
-        <Button
-          onClick={() => setStep("add-ons")}
-          className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
-          disabled={
-            !guestInfo.firstName ||
-            !guestInfo.lastName ||
-            !guestInfo.email ||
-            !guestInfo.phone
-          }
-        >
-          Continue to Add-ons
-          <ArrowRight className="h-4 w-4 ml-2" />
-        </Button>
-      </div>
-    </div>
-  );
-
-  const renderAddOnsStep = () => (
-    <div className="space-y-6">
-      <div className="text-center mb-6">
-        <h3 className="text-lg font-semibold text-sheraton-navy mb-2">
-          Enhance Your Stay
-        </h3>
-        <p className="text-gray-600">
-          Add special services and amenities to make your experience unforgettable
-        </p>
-      </div>
-
-      <div className="grid gap-4">
-        {addOnServices.map((service) => (
-          <div
-            key={service.id}
-            className={`border rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${
-              selectedAddOns.includes(service.id)
-                ? "border-sheraton-gold bg-sheraton-gold/5"
-                : "border-gray-200"
-            }`}
-            onClick={() => handleAddOnToggle(service.id)}
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="p-2 bg-sheraton-cream rounded-lg">
-                  <service.icon className="h-5 w-5 text-sheraton-navy" />
-                </div>
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <h4 className="font-medium text-sheraton-navy">
-                      {service.name}
-                    </h4>
-                    {service.popular && (
-                      <Badge className="bg-sheraton-gold text-sheraton-navy text-xs">
-                        Popular
-                      </Badge>
-                    )}
-                  </div>
-                  <p className="text-sm text-gray-600">{service.description}</p>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="font-semibold text-sheraton-navy">
-                  ${service.price}
-                </div>
-                <div className="text-xs text-gray-500">per stay</div>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Special Options */}
-      <div className="bg-sheraton-cream rounded-lg p-4">
-        <h4 className="font-medium text-sheraton-navy mb-3">Convenience Options</h4>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="font-medium">Early Check-in (12 PM)</span>
-              <p className="text-sm text-gray-600">Subject to availability</p>
-            </div>
-            <Switch
-              checked={earlyCheckIn}
-              onCheckedChange={setEarlyCheckIn}
-            />
-          </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="font-medium">Late Check-out (2 PM)</span>
-              <p className="text-sm text-gray-600">Complimentary for special guests</p>
-            </div>
-            <Switch
-              checked={lateCheckOut}
-              onCheckedChange={setLateCheckOut}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="flex space-x-3">
-        <Button
-          variant="outline"
-          onClick={() => setStep("details")}
-          className="flex-1"
-        >
-          <ArrowLeft className="h-4 w-4 mr-2" />
-          Back
-        </Button>
-        <Button
-          onClick={() => setStep("payment")}
-          className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
-        >
-          Continue to Payment
-          <ArrowRight className="h-4 w-4 ml-2" />
-        </Button>
-      </div>
-    </div>
-  );
-
-  const renderPaymentStep = () => (
-    <div className="space-y-6">
-      <h3 className="text-lg font-semibold">Payment & Final Details</h3>
-
-      {/* Loyalty Points */}
-      <div className="bg-sheraton-cream rounded-lg p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center space-x-2">
-            <Crown className="h-5 w-5 text-sheraton-gold" />
-            <span className="font-medium">Loyalty Points</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <span className="text-sm">Use points</span>
-            <Switch checked={usePoints} onCheckedChange={setUsePoints} />
-          </div>
-        </div>
-        <div className="flex items-center justify-between text-sm">
-          <span>Available: {loyaltyPoints.toLocaleString()} points</span>
-          {usePoints && (
-            <span className="text-green-600 font-medium">
-              -${getPointsDiscount().toFixed(2)}
-            </span>
-          )}
-        </div>
-        {usePoints && (
-          <p className="text-xs text-gray-600 mt-1">
-            Using {Math.floor(getPointsDiscount() * 100)} points for discount
-          </p>
-        )}
-      </div>
-
-      {/* Payment Method Selection */}
-      <div className="space-y-3">
-        <label className="block text-sm font-medium">Payment Method</label>
-        <div className="grid grid-cols-3 gap-2">
-          <Button
-            variant={paymentMethod === "card" ? "default" : "outline"}
-            onClick={() => setPaymentMethod("card")}
-            className={
-              paymentMethod === "card"
-                ? "bg-sheraton-gold text-sheraton-navy"
-                : ""
-            }
-          >
-            <CreditCard className="h-4 w-4 mr-2" />
-            Card
-          </Button>
-          <Button
-            variant={paymentMethod === "pay-at-hotel" ? "default" : "outline"}
-            onClick={() => setPaymentMethod("pay-at-hotel")}
-            className={
-              paymentMethod === "pay-at-hotel"
-                ? "bg-sheraton-gold text-sheraton-navy"
-                : ""
-            }
-          >
-            <Building className="h-4 w-4 mr-2" />
-            Pay at Hotel
-          </Button>
-          <Button
-            variant={paymentMethod === "bank-transfer" ? "default" : "outline"}
-            onClick={() => setPaymentMethod("bank-transfer")}
-            className={
-              paymentMethod === "bank-transfer"
-                ? "bg-sheraton-gold text-sheraton-navy"
-                : ""
-            }
-          >
-            <Wallet className="h-4 w-4 mr-2" />
-            Bank Transfer
-          </Button>
-        </div>
-      </div>
-
-      {/* Payment Details */}
-      {paymentMethod === "card" && (
-        <div className="space-y-4 p-4 bg-gray-50 rounded-lg">
-          <div>
-            <label className="block text-sm font-medium mb-2">Cardholder Name</label>
-            <Input
-              value={paymentDetails.cardName}
-              onChange={(e) =>
-                setPaymentDetails(prev => ({ ...prev, cardName: e.target.value }))
-              }
-              placeholder="Name on card"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2">Card Number</label>
-            <Input
-              value={paymentDetails.cardNumber}
-              onChange={(e) =>
-                setPaymentDetails(prev => ({ ...prev, cardNumber: e.target.value }))
-              }
-              placeholder="1234 5678 9012 3456"
-              maxLength={19}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2">Expiry Date</label>
-              <Input
-                value={paymentDetails.expiryDate}
-                onChange={(e) =>
-                  setPaymentDetails(prev => ({ ...prev, expiryDate: e.target.value }))
-                }
-                placeholder="MM/YY"
-                maxLength={5}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">CVV</label>
-              <Input
-                value={paymentDetails.cvv}
-                onChange={(e) =>
-                  setPaymentDetails(prev => ({ ...prev, cvv: e.target.value }))
-                }
-                placeholder="123"
-                maxLength={3}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {paymentMethod === "pay-at-hotel" && (
-        <div className="p-4 bg-blue-50 rounded-lg">
-          <div className="flex items-center space-x-2 mb-2">
-            <Shield className="h-4 w-4 text-blue-600" />
-            <span className="font-medium text-blue-900">Pay at Hotel</span>
-          </div>
-          <p className="text-sm text-blue-700">
-            Complete payment during check-in. We'll hold your reservation with no charge.
-          </p>
-        </div>
-      )}
-
-      {paymentMethod === "bank-transfer" && (
-        <div className="p-4 bg-green-50 rounded-lg">
-          <div className="flex items-center space-x-2 mb-2">
-            <Wallet className="h-4 w-4 text-green-600" />
-            <span className="font-medium text-green-900">Bank Transfer</span>
-          </div>
-          <p className="text-sm text-green-700">
-            Transfer details will be provided after booking confirmation.
-          </p>
-        </div>
-      )}
-
-      {/* Booking Summary */}
-      <div className="bg-white border rounded-lg p-4">
-        <h4 className="font-medium mb-3">Booking Summary</h4>
-        <div className="space-y-2 text-sm">
-          <div className="flex justify-between">
-            <span>Room rate ({totalNights} nights)</span>
-            <span>${totalPrice.toFixed(2)}</span>
-          </div>
-          {savings > 0 && (
-            <div className="flex justify-between text-green-600">
-              <span>Special discount</span>
-              <span>-${savings.toFixed(2)}</span>
-            </div>
-          )}
-          <div className="flex justify-between">
-            <span>Taxes & fees</span>
-            <span>${getTaxesAndFees().toFixed(2)}</span>
-          </div>
-          {getAddOnsTotal() > 0 && (
-            <div className="flex justify-between">
-              <span>Add-on services</span>
-              <span>${getAddOnsTotal().toFixed(2)}</span>
-            </div>
-          )}
-          {usePoints && getPointsDiscount() > 0 && (
-            <div className="flex justify-between text-green-600">
-              <span>Points discount</span>
-              <span>-${getPointsDiscount().toFixed(2)}</span>
-            </div>
-          )}
-          <Separator />
-          <div className="flex justify-between font-semibold text-lg">
-            <span>Total</span>
-            <span>${getFinalTotal().toFixed(2)}</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex space-x-3">
-        <Button
-          variant="outline"
-          onClick={() => setStep("add-ons")}
-          className="flex-1"
-        >
-          <ArrowLeft className="h-4 w-4 mr-2" />
-          Back
-        </Button>
-        <Button
-          onClick={handleBookingSubmit}
-          disabled={isProcessing}
-          className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
-        >
-          {isProcessing ? (
-            "Processing..."
-          ) : (
-            <>
-              Confirm Booking ${getFinalTotal().toFixed(2)}
-              <Receipt className="h-4 w-4 ml-2" />
-            </>
-          )}
-        </Button>
-      </div>
-    </div>
-  );
-
-  const renderConfirmationStep = () => (
-    <div className="text-center space-y-6">
-      <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
-        <CheckCircle className="h-8 w-8 text-green-600" />
-      </div>
-
-      <div>
-        <h3 className="text-2xl font-semibold text-sheraton-navy mb-2">
-          Booking Confirmed!
-        </h3>
-        <p className="text-gray-600">
-          Welcome to Sheraton Special! Your reservation is confirmed and we can't wait to host you.
-        </p>
-      </div>
-
-      <div className="bg-sheraton-cream rounded-lg p-6">
-        <div className="text-center mb-4">
-          <div className="text-sm text-gray-600">Confirmation Number</div>
-          <div className="text-2xl font-bold text-sheraton-navy mb-2">
-            {confirmationNumber}
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => navigator.clipboard.writeText(confirmationNumber)}
-          >
-            <Copy className="h-3 w-3 mr-1" />
-            Copy
-          </Button>
-        </div>
-        
-        {roomData && checkIn && checkOut && (
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <div className="text-gray-600">Room</div>
-              <div className="font-medium">{roomData.name}</div>
-            </div>
-            <div>
-              <div className="text-gray-600">Total Paid</div>
-              <div className="font-medium">${getFinalTotal().toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-gray-600">Check-in</div>
-              <div className="font-medium">{checkIn.toLocaleDateString()}</div>
-            </div>
-            <div>
-              <div className="text-gray-600">Check-out</div>
-              <div className="font-medium">{checkOut.toLocaleDateString()}</div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        <div className="flex items-center justify-center space-x-2 text-sm text-gray-600">
-          <Bell className="h-4 w-4" />
-          <span>Confirmation email sent to {guestInfo.email}</span>
-        </div>
-        <div className="flex items-center justify-center space-x-2 text-sm text-gray-600">
-          <QrCode className="h-4 w-4" />
-          <span>Mobile check-in available 24 hours before arrival</span>
-        </div>
-        <div className="flex items-center justify-center space-x-2 text-sm text-gray-600">
-          <MapPin className="h-4 w-4" />
-          <span>Digital key access will be activated on check-in day</span>
-        </div>
-      </div>
-
-      <div className="bg-sheraton-gold/10 border border-sheraton-gold rounded-lg p-4">
-        <div className="flex items-center justify-center space-x-2 mb-2">
-          <Crown className="h-5 w-5 text-sheraton-gold" />
-          <span className="font-medium text-sheraton-navy">Special Guest Benefits</span>
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div className="flex items-center space-x-1">
-            <Star className="h-3 w-3 text-sheraton-gold" />
-            <span>+{Math.round(getFinalTotal() / 10)} loyalty points</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <Clock className="h-3 w-3 text-sheraton-gold" />
-            <span>Priority check-in</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <Gift className="h-3 w-3 text-sheraton-gold" />
-            <span>Welcome amenities</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <Shield className="h-3 w-3 text-sheraton-gold" />
-            <span>24/7 guest support</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
-          Book Another Stay
-        </Button>
-        <Button
-          onClick={handleClose}
-          className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
-        >
-          Done
-        </Button>
-      </div>
-    </div>
-  );
-
-  if (!isOpen || !roomData) return null;
+  if (!roomData) return null;
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center space-x-2">
-            <Crown className="h-5 w-5 text-sheraton-gold" />
-            <span>Complete Your Booking</span>
-          </DialogTitle>
-        </DialogHeader>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !loading) resetAndClose(); }}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader><DialogTitle className="flex items-center gap-2 text-sheraton-navy"><CreditCard className="h-5 w-5 text-sheraton-gold" />Complete your reservation</DialogTitle></DialogHeader>
+        <div className="rounded-xl bg-sheraton-cream p-4"><div className="flex items-start justify-between gap-4"><div><div className="mb-1 flex flex-wrap items-center gap-2"><h2 className="font-semibold">{roomData.name}</h2><Badge variant="outline">{currency}</Badge></div><p className="text-sm text-muted-foreground"><CalendarDays className="mr-1 inline h-3.5 w-3.5" />{format(checkIn!, "MMM d, yyyy")} – {format(checkOut!, "MMM d, yyyy")} · {totalNights} {totalNights === 1 ? "night" : "nights"}</p><p className="mt-1 text-sm text-muted-foreground">{guests} guests · {roomCount} {Number(roomCount) === 1 ? "room" : "rooms"}</p></div><p className="text-right text-sm font-semibold">{money(Number(roomData.nightly_rate), currency)}<span className="block text-xs font-normal text-muted-foreground">per night</span></p></div></div>
 
-        {/* Step Indicator */}
-        <div className="flex items-center justify-center space-x-4 mb-6">
-          {[
-            { id: "details", label: "Details", icon: User },
-            { id: "add-ons", label: "Add-ons", icon: Gift },
-            { id: "payment", label: "Payment", icon: CreditCard },
-            { id: "confirmation", label: "Confirm", icon: CheckCircle },
-          ].map((stepItem, index) => {
-            const isActive = step === stepItem.id;
-            const isCompleted =
-              (step === "add-ons" && stepItem.id === "details") ||
-              (step === "payment" && ["details", "add-ons"].includes(stepItem.id)) ||
-              (step === "confirmation" && ["details", "add-ons", "payment"].includes(stepItem.id));
+        <div className="my-1 flex items-center justify-center gap-4 text-xs"><span className={step === "details" ? "font-semibold text-sheraton-navy" : "text-muted-foreground"}><User className="mr-1 inline h-3.5 w-3.5" />Guest details</span><span className="h-px w-8 bg-border" /><span className={step === "payment" ? "font-semibold text-sheraton-navy" : "text-muted-foreground"}><CreditCard className="mr-1 inline h-3.5 w-3.5" />Payment</span></div>
 
-            return (
-              <div key={stepItem.id} className="flex items-center">
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    isCompleted
-                      ? "bg-green-500 text-white"
-                      : isActive
-                        ? "bg-sheraton-gold text-sheraton-navy"
-                        : "bg-gray-200 text-gray-500"
-                  }`}
-                >
-                  <stepItem.icon className="h-4 w-4" />
-                </div>
-                <span
-                  className={`ml-2 text-sm ${
-                    isActive ? "font-medium text-sheraton-navy" : "text-gray-500"
-                  }`}
-                >
-                  {stepItem.label}
-                </span>
-                {index < 3 && (
-                  <div
-                    className={`w-8 h-0.5 mx-4 ${
-                      isCompleted ? "bg-green-500" : "bg-gray-200"
-                    }`}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Booking Summary Header */}
-        <div className="bg-sheraton-cream rounded-lg p-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <span className="text-3xl">{roomData.image}</span>
-              <div>
-                <h4 className="font-semibold text-sheraton-navy">{roomData.name}</h4>
-                <p className="text-sm text-gray-600">
-                  {checkIn && checkOut && (
-                    `${checkIn.toLocaleDateString()} - ${checkOut.toLocaleDateString()}`
-                  )} • {guests} guests • {totalNights} nights
-                </p>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-xl font-bold text-sheraton-navy">
-                ${getFinalTotal().toFixed(2)}
-              </div>
-              <div className="text-sm text-gray-600">Total</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Content */}
-        {step === "details" && renderDetailsStep()}
-        {step === "add-ons" && renderAddOnsStep()}
-        {step === "payment" && renderPaymentStep()}
-        {step === "confirmation" && renderConfirmationStep()}
+        {step === "details" ? <form onSubmit={(event) => { event.preventDefault(); setStep("payment"); }} className="space-y-5">
+          <div><h3 className="font-semibold">Primary guest</h3><p className="text-sm text-muted-foreground">Your reservation details and receipt will be sent to this email address.</p></div>
+          <div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><label htmlFor="hotel-first-name" className="text-sm font-medium">First name</label><Input id="hotel-first-name" autoComplete="given-name" value={guestInfo.firstName} onChange={(event) => setGuestInfo({ ...guestInfo, firstName: event.target.value })} maxLength={100} required /></div><div className="space-y-2"><label htmlFor="hotel-last-name" className="text-sm font-medium">Last name</label><Input id="hotel-last-name" autoComplete="family-name" value={guestInfo.lastName} onChange={(event) => setGuestInfo({ ...guestInfo, lastName: event.target.value })} maxLength={100} required /></div><div className="space-y-2"><label htmlFor="hotel-email" className="text-sm font-medium"><Mail className="mr-1 inline h-3.5 w-3.5" />Email address</label><Input id="hotel-email" type="email" autoComplete="email" value={guestInfo.email} onChange={(event) => setGuestInfo({ ...guestInfo, email: event.target.value })} maxLength={254} required /></div><div className="space-y-2"><label htmlFor="hotel-phone" className="text-sm font-medium"><Phone className="mr-1 inline h-3.5 w-3.5" />Phone number</label><Input id="hotel-phone" type="tel" autoComplete="tel" value={guestInfo.phone} onChange={(event) => setGuestInfo({ ...guestInfo, phone: event.target.value })} maxLength={40} required /></div></div>
+          <div className="flex gap-3"><Button type="button" variant="outline" className="flex-1" onClick={resetAndClose}>Cancel</Button><Button type="submit" className="flex-1 sheraton-gradient text-white">Review payment<ArrowRight className="ml-2 h-4 w-4" /></Button></div>
+        </form> : <form onSubmit={handleStartPayment} className="space-y-5">
+          <div className="rounded-lg border p-4"><h3 className="font-semibold">Price breakdown</h3><div className="mt-3 space-y-2 text-sm"><div className="flex justify-between"><span>Accommodation · {totalNights} nights</span><span>{money(bookingQuote?.nightly_subtotal ?? totalPrice + savings, currency)}</span></div>{(bookingQuote?.discount_amount ?? savings) > 0 && <div className="flex justify-between text-green-700"><span>Extended-stay discount</span><span>−{money(bookingQuote?.discount_amount ?? savings, currency)}</span></div>}<div className="flex justify-between"><span>Taxable accommodation</span><span>{money(bookingQuote?.taxable_subtotal ?? totalPrice, currency)}</span></div><div className="flex justify-between"><span>Uganda VAT · 18%</span><span>{bookingQuote ? money(bookingQuote.vat_amount, currency) : "Calculated at hold"}</span></div><div className="flex justify-between"><span>Local Hotel Tax · {bookingQuote ? `${bookingQuote.hotel_classification}-star property` : "classification-based"}</span><span>{bookingQuote ? money(bookingQuote.lht_amount, currency) : "Calculated at hold"}</span></div><Separator /><div className="flex justify-between font-semibold"><span>Amount due</span><span>{bookingQuote ? money(bookingQuote.total_amount, currency) : "Final amount confirmed securely"}</span></div></div><p className="mt-3 text-xs leading-5 text-muted-foreground">The property classification and timestamped exchange-rate snapshot determine the Local Hotel Tax. The complete tax breakdown is saved with your reservation before payment.</p></div>
+          <div className="rounded-lg border border-sheraton-gold/30 bg-sheraton-gold/5 p-4"><div className="flex gap-3"><LockKeyhole className="mt-0.5 h-5 w-5 shrink-0 text-sheraton-gold" /><div><h3 className="font-medium">Secure payment with Flutterwave</h3><p className="mt-1 text-sm text-muted-foreground">You’ll be redirected to Flutterwave’s secure payment page. Card details are never collected or stored by the hotel booking page.{currency === "UGX" ? " Mobile money and card payment are supported." : " Card payment is supported for this currency."}</p></div></div></div>
+          {bookingQuote && <div className="rounded-lg bg-muted/40 p-3 text-sm"><div className="flex justify-between gap-3"><span className="text-muted-foreground">Reservation hold</span><span className="font-medium">Expires {new Date(bookingQuote.expires_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span></div><div className="mt-1 flex justify-between gap-3"><span className="text-muted-foreground">Confirmation reference</span><span className="font-mono font-medium">{bookingQuote.confirmation_number}</span></div><p className="mt-1 text-xs text-muted-foreground">Rates and tax calculation are locked for this reservation.</p></div>}
+          {errorMessage && <div role="alert" className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><AlertCircle className="h-4 w-4 shrink-0" />{errorMessage}</div>}
+          <div className="flex gap-3"><Button type="button" variant="outline" className="flex-1" onClick={() => setStep("details")} disabled={loading}><ArrowLeft className="mr-2 h-4 w-4" />Guest details</Button><Button type="submit" className="flex-1 sheraton-gradient text-white" disabled={loading}>{loading ? "Preparing secure checkout…" : bookingQuote ? `Retry payment · ${money(bookingQuote.total_amount, currency)}` : "Confirm total & pay"}<ArrowRight className="ml-2 h-4 w-4" /></Button></div>
+          <p className="flex items-center justify-center gap-1 text-center text-xs text-muted-foreground"><CheckCircle className="h-3.5 w-3.5 text-green-600" />A 20-minute room hold is reserved while you complete payment.</p>
+        </form>}
       </DialogContent>
     </Dialog>
   );

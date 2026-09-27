@@ -13,6 +13,14 @@ import {
   prepareSpecialEventPayment,
   verifySpecialEventPayment,
 } from "./routes/specialEvents.js";
+import {
+  cancelHotelBookingPayment,
+  createHotelBooking,
+  createHotelPaymentSession,
+  getExchangeRates,
+  handleHotelBookingWebhook,
+  verifyHotelBookingPayment,
+} from "./routes/hotelBookings.js";
 
 export function createServer() {
   const app = express();
@@ -36,6 +44,12 @@ export function createServer() {
   app.post("/api/payments/special-events/verify", verifySpecialEventPayment);
   app.post("/api/payments/special-events/cancel", cancelSpecialEventPayment);
   app.post("/api/payments/special-events/webhook", handleSpecialEventWebhook);
+  app.post("/api/hotel-bookings/create", createHotelBooking);
+  app.post("/api/payments/hotel/session", createHotelPaymentSession);
+  app.post("/api/payments/hotel/verify", verifyHotelBookingPayment);
+  app.post("/api/payments/hotel/cancel", cancelHotelBookingPayment);
+  app.post("/api/payments/hotel/webhook", handleHotelBookingWebhook);
+  app.get("/api/books/fx-rates", getExchangeRates);
 
   return app;
 }
