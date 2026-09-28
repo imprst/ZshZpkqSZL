@@ -514,15 +514,19 @@ begin
   if selected_classification is null or selected_classification not between 1 and 5 then raise exception 'The hotel must set its star classification before accepting bookings'; end if;
   if target_guest_count > selected_room.max_guests * target_room_count then raise exception 'Guest count exceeds the selected room capacity'; end if;
 
-  update public.hotel_bookings set booking_status = 'expired', payment_status = 'cancelled'
-   where room_id = selected_room.id and booking_status = 'pending' and expires_at <= now();
+  update public.hotel_bookings as hb
+     set booking_status = 'expired', payment_status = 'cancelled'
+   where hb.room_id = selected_room.id
+     and hb.booking_status = 'pending'
+     and hb.expires_at <= now();
 
-  select coalesce(sum(room_count), 0) into reserved_units
-    from public.hotel_bookings
-   where room_id = selected_room.id
-     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
-       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
-     and check_in < target_check_out and check_out > target_check_in;
+  select coalesce(sum(hb.room_count), 0) into reserved_units
+    from public.hotel_bookings as hb
+   where hb.room_id = selected_room.id
+     and ((hb.booking_status in ('confirmed', 'manual_review') and hb.payment_status = 'paid')
+       or (hb.booking_status = 'pending' and hb.payment_status = 'pending' and hb.expires_at > now()))
+     and hb.check_in < target_check_out
+     and hb.check_out > target_check_in;
   if reserved_units + target_room_count > selected_room.available_units then
     raise exception 'The selected room is no longer available for these dates';
   end if;
