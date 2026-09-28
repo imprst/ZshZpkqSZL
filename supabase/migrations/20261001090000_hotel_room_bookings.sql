@@ -70,11 +70,19 @@ revoke all on function public.sync_hotel_classification() from public;
 create or replace function public.initialize_hotel_classification()
 returns trigger language plpgsql security definer set search_path = public
 as $$
+declare
+  manager_classification smallint;
+  manager_organization_name text;
 begin
+  select hotel_star_rating, nullif(trim(organization_name), '')
+    into manager_classification, manager_organization_name
+    from public.user_profiles
+   where user_id = new.owner_id and role = 'manager';
   if new.hotel_classification is null then
-    select hotel_star_rating into new.hotel_classification
-      from public.user_profiles
-     where user_id = new.owner_id and role = 'manager';
+    new.hotel_classification := manager_classification;
+  end if;
+  if manager_organization_name is not null then
+    new.name := manager_organization_name;
   end if;
   return new;
 end;
@@ -85,8 +93,36 @@ create trigger initialize_hotel_classification before insert on public.books_org
 for each row execute function public.initialize_hotel_classification();
 revoke all on function public.initialize_hotel_classification() from public;
 
+create or replace function public.sync_hotel_organization_name()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.role = 'manager' and new.organization_name is distinct from old.organization_name then
+    if auth.uid() is not null and auth.uid() <> old.user_id then
+      raise exception 'Only the hotel manager can change this organization name';
+    end if;
+    update public.books_organizations bo
+       set name = nullif(trim(new.organization_name), '')
+      from public.books_memberships bm
+     where bm.organization_id = bo.id
+       and bm.user_id = bo.owner_id
+       and bm.role = 'owner'
+       and bo.owner_id = new.user_id
+       and nullif(trim(new.organization_name), '') is not null;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists sync_hotel_organization_name on public.user_profiles;
+create trigger sync_hotel_organization_name
+after update of organization_name on public.user_profiles
+for each row execute function public.sync_hotel_organization_name();
+revoke all on function public.sync_hotel_organization_name() from public;
+
 update public.books_organizations bo
-   set hotel_classification = up.hotel_star_rating
+   set hotel_classification = case when up.hotel_star_rating between 1 and 5 then up.hotel_star_rating else bo.hotel_classification end,
+       name = case when bo.name = 'My business' and nullif(trim(up.organization_name), '') is not null then trim(up.organization_name) else bo.name end
   from public.books_memberships bm
   join public.user_profiles up on up.user_id = bm.user_id
  where bm.organization_id = bo.id
@@ -94,8 +130,7 @@ update public.books_organizations bo
    and up.user_id = bo.owner_id
    and bm.role = 'owner'
    and up.role = 'manager'
-   and up.hotel_star_rating between 1 and 5
-   and bo.hotel_classification is distinct from up.hotel_star_rating;
+   and (bo.hotel_classification is distinct from up.hotel_star_rating or (bo.name = 'My business' and nullif(trim(up.organization_name), '') is not null));
 
 create table if not exists public.hotel_booking_page_settings (
   id boolean primary key default true check (id),
@@ -472,19 +507,26 @@ begin
 
   select * into selected_room from public.hotel_rooms where id = target_room_id and status = 'published' for update;
   if not found then raise exception 'This room is not available for booking'; end if;
-  select hotel_classification into selected_classification from public.books_organizations where id = selected_room.organization_id;
+  select bo.hotel_classification
+    into selected_classification
+    from public.books_organizations as bo
+   where bo.id = selected_room.organization_id;
   if selected_classification is null or selected_classification not between 1 and 5 then raise exception 'The hotel must set its star classification before accepting bookings'; end if;
   if target_guest_count > selected_room.max_guests * target_room_count then raise exception 'Guest count exceeds the selected room capacity'; end if;
 
-  update public.hotel_bookings set booking_status = 'expired', payment_status = 'cancelled'
-   where room_id = selected_room.id and booking_status = 'pending' and expires_at <= now();
+  update public.hotel_bookings as hb
+     set booking_status = 'expired', payment_status = 'cancelled'
+   where hb.room_id = selected_room.id
+     and hb.booking_status = 'pending'
+     and hb.expires_at <= now();
 
-  select coalesce(sum(room_count), 0) into reserved_units
-    from public.hotel_bookings
-   where room_id = selected_room.id
-     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
-       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
-     and check_in < target_check_out and check_out > target_check_in;
+  select coalesce(sum(hb.room_count), 0) into reserved_units
+    from public.hotel_bookings as hb
+   where hb.room_id = selected_room.id
+     and ((hb.booking_status in ('confirmed', 'manual_review') and hb.payment_status = 'paid')
+       or (hb.booking_status = 'pending' and hb.payment_status = 'pending' and hb.expires_at > now()))
+     and hb.check_in < target_check_out
+     and hb.check_out > target_check_in;
   if reserved_units + target_room_count > selected_room.available_units then
     raise exception 'The selected room is no longer available for these dates';
   end if;
@@ -647,14 +689,21 @@ begin
   end if;
   if booking.booking_status not in ('pending', 'expired', 'cancelled') then raise exception 'Hotel booking cannot be confirmed'; end if;
   if booking.booking_status = 'cancelled' then resolved_status := 'manual_review'; end if;
-  update public.hotel_bookings set booking_status = 'expired', payment_status = 'cancelled'
-   where room_id = booking.room_id and id <> booking.id and booking_status = 'pending' and expires_at <= now();
-  select coalesce(sum(room_count), 0) into reserved_units
-    from public.hotel_bookings
-   where room_id = booking.room_id and id <> booking.id
-     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
-       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
-     and check_in < booking.check_out and check_out > booking.check_in;
+  update public.hotel_bookings as expired_booking
+     set booking_status = 'expired', payment_status = 'cancelled'
+   where expired_booking.room_id = booking.room_id
+     and expired_booking.id <> booking.id
+     and expired_booking.booking_status = 'pending'
+     and expired_booking.expires_at <= now();
+
+  select coalesce(sum(reservation.room_count), 0) into reserved_units
+    from public.hotel_bookings as reservation
+   where reservation.room_id = booking.room_id
+     and reservation.id <> booking.id
+     and ((reservation.booking_status in ('confirmed', 'manual_review') and reservation.payment_status = 'paid')
+       or (reservation.booking_status = 'pending' and reservation.payment_status = 'pending' and reservation.expires_at > now()))
+     and reservation.check_in < booking.check_out
+     and reservation.check_out > booking.check_in;
   if booking.booking_status <> 'cancelled' and reserved_units + booking.room_count > room.available_units then
     resolved_status := 'manual_review';
   end if;
@@ -723,7 +772,7 @@ begin
     if selected_rate is null then raise exception 'Selected tax rate is not active for this invoice date'; end if;
     new.tax_rate_percentage := selected_rate;
     new.tax_amount := case when new.invoice_number like 'HOTEL-%'
-      then round(new.subtotal * selected_rate / 100, 2)
+      then round(new.subtotal * selected_rate / 100, case when new.currency_code in ('UGX', 'RWF', 'TZS') then 0 else 2 end)
       else round(new.subtotal * selected_rate / 100, 4)
     end;
   else
@@ -858,10 +907,6 @@ begin
 
   insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
   values (invoice_uuid, new.organization_id, 'Accommodation (' || new.nights || ' night(s))', 1, new.taxable_subtotal);
-  if new.lht_amount > 0 then
-    insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
-    values (invoice_uuid, new.organization_id, 'Local Hotel Tax', 1, new.lht_amount);
-  end if;
   update public.books_invoices set status = 'paid' where id = invoice_uuid;
   perform public.post_hotel_invoice_recognition(invoice_uuid);
   update public.hotel_bookings
