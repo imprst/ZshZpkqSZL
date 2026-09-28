@@ -689,14 +689,21 @@ begin
   end if;
   if booking.booking_status not in ('pending', 'expired', 'cancelled') then raise exception 'Hotel booking cannot be confirmed'; end if;
   if booking.booking_status = 'cancelled' then resolved_status := 'manual_review'; end if;
-  update public.hotel_bookings set booking_status = 'expired', payment_status = 'cancelled'
-   where room_id = booking.room_id and id <> booking.id and booking_status = 'pending' and expires_at <= now();
-  select coalesce(sum(room_count), 0) into reserved_units
-    from public.hotel_bookings
-   where room_id = booking.room_id and id <> booking.id
-     and ((booking_status in ('confirmed', 'manual_review') and payment_status = 'paid')
-       or (booking_status = 'pending' and payment_status = 'pending' and expires_at > now()))
-     and check_in < booking.check_out and check_out > booking.check_in;
+  update public.hotel_bookings as expired_booking
+     set booking_status = 'expired', payment_status = 'cancelled'
+   where expired_booking.room_id = booking.room_id
+     and expired_booking.id <> booking.id
+     and expired_booking.booking_status = 'pending'
+     and expired_booking.expires_at <= now();
+
+  select coalesce(sum(reservation.room_count), 0) into reserved_units
+    from public.hotel_bookings as reservation
+   where reservation.room_id = booking.room_id
+     and reservation.id <> booking.id
+     and ((reservation.booking_status in ('confirmed', 'manual_review') and reservation.payment_status = 'paid')
+       or (reservation.booking_status = 'pending' and reservation.payment_status = 'pending' and reservation.expires_at > now()))
+     and reservation.check_in < booking.check_out
+     and reservation.check_out > booking.check_in;
   if booking.booking_status <> 'cancelled' and reserved_units + booking.room_count > room.available_units then
     resolved_status := 'manual_review';
   end if;
