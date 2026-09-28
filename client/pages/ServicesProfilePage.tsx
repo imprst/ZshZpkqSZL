@@ -122,7 +122,7 @@ const ServicesProfilePage = () => {
 
         const { error } = await supabase
           .from("user_profiles")
-          .update({ [dbFieldName]: value })
+          .update({ [dbFieldName]: fieldName === 'hotelStarRating' && value ? Number(value) : value })
           .eq("user_id", userIdRef.current);
         if (error) throw error;
       } catch (error) {
@@ -164,6 +164,7 @@ const ServicesProfilePage = () => {
             .insert({
               user_id: user.id,
               organization_name: metadata.organization_name || null,
+              hotel_star_rating: metadata.hotel_star_rating ? Number(metadata.hotel_star_rating) : null,
               email: user.email || "",
               first_name: metadata.first_name || "",
               last_name: metadata.last_name || "",

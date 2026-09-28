@@ -43,6 +43,7 @@ const RegisterPage: React.FC = () => {
     menuAccessRole: "none" as "none" | "chef" | "food_beverage_manager",
     // Personal Information
     organizationName: "",
+    hotelStarRating: "",
     firstName: "",
     lastName: "",
     email: "",
@@ -168,6 +169,7 @@ const RegisterPage: React.FC = () => {
           emailRedirectTo: new URL(returnTo, window.location.origin).toString(),
           data: {
             organization_name: formData.role === "manager" ? formData.organizationName : null,
+            hotel_star_rating: formData.role === "manager" && formData.hotelStarRating ? Number(formData.hotelStarRating) : null,
             first_name: formData.firstName,
             last_name: formData.lastName,
             phone: formData.phone,
@@ -195,6 +197,7 @@ const RegisterPage: React.FC = () => {
       const profileData: Record<string, any> = {
         user_id: authData.user.id,
         organization_name: formData.role === "manager" ? formData.organizationName.trim() : null,
+        hotel_star_rating: formData.role === "manager" && formData.hotelStarRating ? Number(formData.hotelStarRating) : null,
         first_name: formData.firstName,
         last_name: formData.lastName,
         email: formData.email,
@@ -434,6 +437,19 @@ const RegisterPage: React.FC = () => {
             placeholder="Hotel, restaurant, or organization name"
           />
           {errors.organizationName && <p className="text-red-500 text-sm mt-1">{errors.organizationName}</p>}
+          <label htmlFor="hotelStarRating" className="mt-4 block text-sm font-medium mb-2">Official hotel star classification</label>
+          <select
+            id="hotelStarRating"
+            value={formData.hotelStarRating}
+            onChange={(e) => setFormData((prev) => ({ ...prev, hotelStarRating: e.target.value }))}
+            className="w-full px-3 py-2 border rounded-md border-gray-300"
+          >
+            <option value="">Not classified / not applicable</option>
+            {[1, 2, 3, 4, 5].map((rating) => (
+              <option key={rating} value={String(rating)}>{rating}-star hotel</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-muted-foreground">This classification determines Local Hotel Tax on room bookings.</p>
         </div>
       )}
 

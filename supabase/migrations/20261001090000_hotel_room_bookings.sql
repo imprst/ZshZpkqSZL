@@ -507,7 +507,10 @@ begin
 
   select * into selected_room from public.hotel_rooms where id = target_room_id and status = 'published' for update;
   if not found then raise exception 'This room is not available for booking'; end if;
-  select hotel_classification into selected_classification from public.books_organizations where id = selected_room.organization_id;
+  select bo.hotel_classification
+    into selected_classification
+    from public.books_organizations as bo
+   where bo.id = selected_room.organization_id;
   if selected_classification is null or selected_classification not between 1 and 5 then raise exception 'The hotel must set its star classification before accepting bookings'; end if;
   if target_guest_count > selected_room.max_guests * target_room_count then raise exception 'Guest count exceeds the selected room capacity'; end if;
 
